@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# scan artifacts / outputs
+*.log
+scan-output/
+results/
+*.jsonl
