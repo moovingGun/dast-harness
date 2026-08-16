@@ -47,8 +47,12 @@ runner.wait(scan_id)
 print(ConsoleReporter().render(build_report(runner, scan_id)))
 ```
 
-- `get_status`는 롤업 상태(any running→running, any failed→failed, else completed)와
-  스캐너별 breakdown을 함께 준다.
+- `get_status`는 롤업 상태와 스캐너별 breakdown을 함께 준다. 롤업 규칙:
+  - `running` — 하나라도 진행 중
+  - `completed` — 전부 완료
+  - `partial` — 일부만 완료(나머지 실패/중단) → 결과가 일부 존재
+  - `stopped` — 완료 0개 + 중단 있음
+  - `failed` — 완료 0개 + 전부 실패
 - `get_results`/`get_warnings`는 전 스캐너 결과를 병합한다(경고는 `[scanner]` 접두).
 - `example_multi.py` 참고.
 

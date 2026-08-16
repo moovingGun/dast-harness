@@ -5,6 +5,7 @@ from dast_harness import (
     Finding,
     MultiScanRunner,
     ScanConfig,
+    ScanStatus,
     Severity,
     Target,
     build_report,
@@ -77,6 +78,38 @@ class ControlledScanner(Scanner):
         return 0
 
 
+class RollupTests(unittest.TestCase):
+    """The decided overall-status model, encoded directly (no threads)."""
+
+    C = ScanStatus.COMPLETED.value
+    F = ScanStatus.FAILED.value
+    S = ScanStatus.STOPPED.value
+    R = ScanStatus.RUNNING.value
+    P = ScanStatus.PENDING.value
+
+    def assertRollup(self, statuses, expected) -> None:
+        self.assertEqual(MultiScanRunner._rollup(statuses), expected)
+
+    def test_all_completed(self) -> None:
+        self.assertRollup([self.C, self.C], ScanStatus.COMPLETED.value)
+
+    def test_any_active_is_running(self) -> None:
+        self.assertRollup([self.C, self.R], ScanStatus.RUNNING.value)
+        self.assertRollup([self.P, self.F], ScanStatus.RUNNING.value)
+
+    def test_some_completed_some_not_is_partial(self) -> None:
+        self.assertRollup([self.C, self.F], ScanStatus.PARTIAL.value)
+        self.assertRollup([self.C, self.S], ScanStatus.PARTIAL.value)
+        self.assertRollup([self.C, self.F, self.S], ScanStatus.PARTIAL.value)
+
+    def test_none_completed_with_stop_is_stopped(self) -> None:
+        self.assertRollup([self.S, self.S], ScanStatus.STOPPED.value)
+        self.assertRollup([self.F, self.S], ScanStatus.STOPPED.value)
+
+    def test_all_failed_is_failed(self) -> None:
+        self.assertRollup([self.F, self.F], ScanStatus.FAILED.value)
+
+
 class MultiScanRunnerConcurrencyTests(unittest.TestCase):
     def test_scanners_run_in_parallel(self) -> None:
         a, b = ControlledScanner("a"), ControlledScanner("b")
@@ -119,7 +152,7 @@ class MultiScanRunnerConcurrencyTests(unittest.TestCase):
         status = runner.wait(scan_id, timeout=2)
         self.assertEqual(status["status"], "stopped")
 
-    def test_completed_plus_stopped_rolls_up_to_stopped(self) -> None:
+    def test_completed_plus_stopped_rolls_up_to_partial(self) -> None:
         done = FindingScanner("done", 1)      # finishes immediately
         blocked = ControlledScanner("blocked")
         runner = MultiScanRunner([done, blocked])
@@ -128,8 +161,10 @@ class MultiScanRunnerConcurrencyTests(unittest.TestCase):
 
         runner.stop_scan(scan_id)             # only 'blocked' is still active
         status = runner.wait(scan_id, timeout=2)
-        self.assertEqual(status["status"], "stopped")
+        # one completed before the stop -> results exist -> partial, not stopped
+        self.assertEqual(status["status"], "partial")
         self.assertEqual(status["scanners"]["done"]["status"], "completed")
+        self.assertEqual(status["scanners"]["blocked"]["status"], "stopped")
 
     def test_unknown_scan_id_raises(self) -> None:
         runner = MultiScanRunner([FindingScanner("a", 1)])
@@ -153,12 +188,13 @@ class MultiScanRunnerTests(unittest.TestCase):
         by_scanner = {f.scanner for f in runner.get_results(scan_id)}
         self.assertEqual(by_scanner, {"a", "b"})
 
-    def test_one_failure_makes_overall_failed_but_keeps_others(self) -> None:
+    def test_one_failure_makes_overall_partial_but_keeps_others(self) -> None:
         runner = MultiScanRunner([FindingScanner("a", 2), FailScanner()])
         scan_id = runner.start_scan(Target("http://127.0.0.1"))
         status = runner.wait(scan_id, timeout=2)
 
-        self.assertEqual(status["status"], "failed")
+        # some completed, some failed -> partial (results still exist)
+        self.assertEqual(status["status"], "partial")
         self.assertEqual(status["scanners"]["a"]["status"], "completed")
         self.assertEqual(status["scanners"]["fail"]["status"], "failed")
         # the healthy scanner's findings still survive

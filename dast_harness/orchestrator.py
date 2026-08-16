@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import uuid
 
-from .models import Finding, ScanConfig, Target
+from .models import Finding, ScanConfig, ScanStatus, Target
 from .runner import ScanRunner
 from .safety import authorize_target
 from .scanners.base import Scanner
@@ -51,21 +51,36 @@ class MultiScanRunner:
                 raise KeyError(f"unknown scan_id {group_id!r}")
             return self._groups[group_id]
 
+    @staticmethod
+    def _rollup(statuses: list[str]) -> str:
+        """Combine per-scanner statuses into one overall status.
+
+        running  : any scanner still active
+        completed: every scanner completed
+        partial  : some completed, some did not (failed/stopped) — results exist
+        stopped  : none completed, at least one was stopped
+        failed   : none completed, all failed
+        """
+        active = {ScanStatus.PENDING.value, ScanStatus.RUNNING.value}
+        if any(s in active for s in statuses):
+            return ScanStatus.RUNNING.value
+
+        completed = sum(s == ScanStatus.COMPLETED.value for s in statuses)
+        if completed == len(statuses):
+            return ScanStatus.COMPLETED.value
+        if completed:
+            return ScanStatus.PARTIAL.value
+        if any(s == ScanStatus.STOPPED.value for s in statuses):
+            return ScanStatus.STOPPED.value
+        return ScanStatus.FAILED.value
+
     def get_status(self, group_id: str) -> dict:
         mapping = self._mapping(group_id)
         per = {
             name: self._runners[name].get_status(child_id)
             for name, child_id in mapping.items()
         }
-        statuses = [p["status"] for p in per.values()]
-        if any(s in ("pending", "running") for s in statuses):
-            overall = "running"
-        elif any(s == "failed" for s in statuses):
-            overall = "failed"
-        elif any(s == "stopped" for s in statuses):
-            overall = "stopped"
-        else:
-            overall = "completed"
+        overall = self._rollup([p["status"] for p in per.values()])
 
         first = next(iter(per.values()))
         return {

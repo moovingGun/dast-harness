@@ -32,6 +32,9 @@ class ScanStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+    # Multi-scanner rollup only: some scanners completed, others did not.
+    # A single scan never reaches this state.
+    PARTIAL = "partial"
 
 
 @dataclass(frozen=True)
