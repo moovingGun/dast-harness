@@ -13,7 +13,23 @@ dast_harness/
   scanners/base.py   # Scanner 추상 인터페이스
   scanners/nuclei.py # nuclei 실행 + JSONL 스트리밍 파싱 → Finding 정규화
   runner.py          # start_scan / get_status / get_results / stop_scan / wait
+  reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
+  reporters/json_reporter.py     # findings → JSON 문자열
+  reporters/console_reporter.py  # 심각도별 콘솔 요약
 example.py           # 사용 예시
+```
+
+## 리포팅 (reporters/)
+
+스캔 결과(`Finding` 리스트)를 출력 포맷으로 내보내는 얇은 계층. 스캔 로직과 분리돼
+있고, `Finding`이 스캐너 무관이라 스캐너를 추가해도 그대로 재사용된다.
+
+```python
+from dast_harness import build_report, ConsoleReporter, JSONReporter
+
+report = build_report(runner, scan_id)
+print(ConsoleReporter().render(report))          # 콘솔 요약
+open("results.json", "w").write(JSONReporter().render(report))  # JSON 저장
 ```
 
 ## 안전장치 (safety.py)

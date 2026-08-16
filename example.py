@@ -10,7 +10,16 @@ authorized to test, add it to `allowlist` below.
 import sys
 import time
 
-from dast_harness import NucleiScanner, ScanConfig, ScanRunner, Severity, Target
+from dast_harness import (
+    ConsoleReporter,
+    JSONReporter,
+    NucleiScanner,
+    ScanConfig,
+    ScanRunner,
+    Severity,
+    Target,
+    build_report,
+)
 from dast_harness.safety import TargetNotAuthorizedError
 
 
@@ -44,9 +53,13 @@ def main() -> int:
             break
         time.sleep(2)
 
-    print("\nfinal status:", runner.get_status(scan_id))
-    for f in runner.get_results(scan_id):
-        print(f"  [{f.severity.value}] {f.finding_id} @ {f.matched_at}  {f.name}")
+    # Report: console summary to stdout, full results to results.json.
+    report = build_report(runner, scan_id)
+    print()
+    print(ConsoleReporter().render(report))
+    with open("results.json", "w", encoding="utf-8") as fh:
+        fh.write(JSONReporter().render(report))
+    print("\nwrote results.json")
     return 0
 
 

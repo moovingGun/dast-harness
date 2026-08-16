@@ -9,4 +9,5 @@ env/
 *.log
 scan-output/
 results/
+results.json
 *.jsonl
