@@ -20,6 +20,8 @@ class MultiScanRunner:
     def __init__(
         self, scanners: list[Scanner], allowlist: set[str] | None = None
     ) -> None:
+        if not scanners:
+            raise ValueError("at least one scanner is required")
         names = [s.name for s in scanners]
         if len(names) != len(set(names)):
             raise ValueError(f"scanner names must be unique, got {names}")

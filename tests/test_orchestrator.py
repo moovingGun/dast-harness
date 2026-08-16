@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from dast_harness import (
@@ -48,6 +49,96 @@ class WarnScanner(Scanner):
         if on_warning is not None:
             on_warning("something odd")
         return 0
+
+
+class ControlledScanner(Scanner):
+    """Emits its findings, then blocks until released (or stopped), so tests can
+    observe the mid-scan 'running' state and control timing deterministically."""
+
+    def __init__(self, name: str, findings: int = 0) -> None:
+        self.name = name
+        self._findings = findings
+        self.entered = threading.Event()   # set once findings are delivered
+        self.release = threading.Event()   # test sets this to let run() finish
+
+    def is_available(self) -> bool:
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+        for i in range(self._findings):
+            on_finding(
+                Finding(self.name, f"{self.name}-{i}", "x", Severity.HIGH, target.url)
+            )
+        self.entered.set()
+        while not self.release.is_set():
+            if stop_event is not None and stop_event.is_set():
+                return -15
+            self.release.wait(timeout=0.01)
+        return 0
+
+
+class MultiScanRunnerConcurrencyTests(unittest.TestCase):
+    def test_scanners_run_in_parallel(self) -> None:
+        a, b = ControlledScanner("a"), ControlledScanner("b")
+        runner = MultiScanRunner([a, b])
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+        try:
+            # Both enter run() while neither has been released -> both alive at
+            # once, which only happens if they run concurrently.
+            self.assertTrue(a.entered.wait(2))
+            self.assertTrue(b.entered.wait(2))
+            self.assertEqual(runner.get_status(scan_id)["status"], "running")
+        finally:
+            a.release.set()
+            b.release.set()
+        self.assertEqual(runner.wait(scan_id, timeout=2)["status"], "completed")
+
+    def test_running_status_and_partial_results_midscan(self) -> None:
+        a = ControlledScanner("a", findings=2)
+        runner = MultiScanRunner([a])
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+        try:
+            self.assertTrue(a.entered.wait(2))
+            status = runner.get_status(scan_id)
+            self.assertEqual(status["status"], "running")
+            self.assertEqual(status["scanners"]["a"]["status"], "running")
+            # findings are already observable before the scan finishes
+            self.assertEqual(len(runner.get_results(scan_id)), 2)
+        finally:
+            a.release.set()
+        runner.wait(scan_id, timeout=2)
+
+    def test_stop_marks_multi_stopped(self) -> None:
+        a, b = ControlledScanner("a"), ControlledScanner("b")
+        runner = MultiScanRunner([a, b])
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+        self.assertTrue(a.entered.wait(2))
+        self.assertTrue(b.entered.wait(2))
+
+        runner.stop_scan(scan_id)
+        status = runner.wait(scan_id, timeout=2)
+        self.assertEqual(status["status"], "stopped")
+
+    def test_completed_plus_stopped_rolls_up_to_stopped(self) -> None:
+        done = FindingScanner("done", 1)      # finishes immediately
+        blocked = ControlledScanner("blocked")
+        runner = MultiScanRunner([done, blocked])
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+        self.assertTrue(blocked.entered.wait(2))
+
+        runner.stop_scan(scan_id)             # only 'blocked' is still active
+        status = runner.wait(scan_id, timeout=2)
+        self.assertEqual(status["status"], "stopped")
+        self.assertEqual(status["scanners"]["done"]["status"], "completed")
+
+    def test_unknown_scan_id_raises(self) -> None:
+        runner = MultiScanRunner([FindingScanner("a", 1)])
+        with self.assertRaises(KeyError):
+            runner.get_status("nope")
+
+    def test_empty_scanner_list_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            MultiScanRunner([])
 
 
 class MultiScanRunnerTests(unittest.TestCase):
