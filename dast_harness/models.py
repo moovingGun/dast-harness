@@ -85,11 +85,21 @@ class ScanState:
     error: str | None = None
     authorization_reason: str = ""
     _findings: list[Finding] = field(default_factory=list)
+    _warnings: list[str] = field(default_factory=list)
+    _warnings_total: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add_finding(self, finding: Finding) -> None:
         with self._lock:
             self._findings.append(finding)
+
+    def add_warning(self, message: str) -> None:
+        """Record a non-fatal scanner warning. The stored sample is bounded; the
+        total count is always exact."""
+        with self._lock:
+            self._warnings_total += 1
+            if len(self._warnings) < 200:
+                self._warnings.append(message)
 
     def mark_running(self, started_at: float) -> None:
         with self._lock:
@@ -121,6 +131,11 @@ class ScanState:
         with self._lock:
             return list(self._findings)
 
+    def warnings(self) -> list[str]:
+        """Return a snapshot copy of the accumulated warning sample."""
+        with self._lock:
+            return list(self._warnings)
+
     def snapshot(self) -> dict[str, Any]:
         """Serializable status view for `get_status`."""
         with self._lock:
@@ -134,4 +149,5 @@ class ScanState:
                 "error": self.error,
                 "authorization_reason": self.authorization_reason,
                 "findings_count": len(self._findings),
+                "warnings_count": self._warnings_total,
             }

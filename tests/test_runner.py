@@ -13,25 +13,32 @@ class ExitScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
         return self.exit_code
 
 
 class ErrorScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
         raise RuntimeError("scanner exploded")
 
 
 class ProcessErrorScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
         raise ScannerExecutionError("scanner exited with code 9", 9)
 
 
 class BlockingScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
         assert stop_event is not None
         stop_event.wait(timeout=2)
         return -15 if stop_event.is_set() else 0
+
+
+class WarningScanner(ExitScanner):
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+        if on_warning is not None:
+            on_warning("skipped a bad line")
+        return 0
 
 
 class ScanRunnerTests(unittest.TestCase):
@@ -82,6 +89,16 @@ class ScanRunnerTests(unittest.TestCase):
 
         self.assertEqual(status["status"], ScanStatus.STOPPED.value)
         self.assertEqual(status["exit_code"], -15)
+
+    def test_warnings_do_not_fail_a_scan(self) -> None:
+        runner = ScanRunner(WarningScanner(0))
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+
+        status = runner.wait(scan_id, timeout=2)
+
+        self.assertEqual(status["status"], ScanStatus.COMPLETED.value)
+        self.assertEqual(status["warnings_count"], 1)
+        self.assertEqual(runner.get_warnings(scan_id), ["skipped a bad line"])
 
     def test_stopping_finished_scan_does_not_change_status(self) -> None:
         runner = ScanRunner(ExitScanner(0))

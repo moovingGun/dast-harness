@@ -61,7 +61,11 @@ class ScanRunner:
         error: str | None = None
         try:
             code = self.scanner.run(
-                state.target, config, state.add_finding, stop_event
+                state.target,
+                config,
+                state.add_finding,
+                stop_event,
+                state.add_warning,
             )
             if stop_event.is_set():
                 status = ScanStatus.STOPPED
@@ -100,6 +104,9 @@ class ScanRunner:
 
     def get_results(self, scan_id: str) -> list[Finding]:
         return self._get(scan_id).findings()
+
+    def get_warnings(self, scan_id: str) -> list[str]:
+        return self._get(scan_id).warnings()
 
     def stop_scan(self, scan_id: str) -> None:
         state = self._get(scan_id)

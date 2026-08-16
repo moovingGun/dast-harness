@@ -12,7 +12,7 @@ from collections import deque
 from typing import Any
 
 from ..models import Finding, ScanConfig, Severity, Target
-from .base import OnFinding, Scanner, ScannerExecutionError
+from .base import OnFinding, OnWarning, Scanner, ScannerExecutionError
 
 
 class NucleiScanner(Scanner):
@@ -67,6 +67,7 @@ class NucleiScanner(Scanner):
         config: ScanConfig,
         on_finding: OnFinding,
         stop_event: threading.Event | None = None,
+        on_warning: OnWarning | None = None,
     ) -> int:
         cmd = self._build_command(target, config)
         proc = subprocess.Popen(
@@ -96,14 +97,14 @@ class NucleiScanner(Scanner):
                         continue
                     try:
                         data = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise RuntimeError(
-                            f"nuclei emitted invalid JSONL: {line[:200]!r}"
-                        ) from exc
+                    except json.JSONDecodeError:
+                        if on_warning is not None:
+                            on_warning(f"invalid JSONL skipped: {line[:200]!r}")
+                        continue
                     if not isinstance(data, dict):
-                        raise RuntimeError(
-                            "nuclei emitted a JSONL value that is not an object"
-                        )
+                        if on_warning is not None:
+                            on_warning(f"non-object JSONL skipped: {line[:200]!r}")
+                        continue
                     on_finding(self._to_finding(data))
             except Exception as exc:  # propagate reader/callback failures below
                 reader_errors.append(exc)

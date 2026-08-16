@@ -10,6 +10,7 @@ from typing import Callable
 from ..models import Finding, ScanConfig, Target
 
 OnFinding = Callable[[Finding], None]
+OnWarning = Callable[[str], None]
 
 
 class ScannerExecutionError(RuntimeError):
@@ -34,11 +35,13 @@ class Scanner(ABC):
         config: ScanConfig,
         on_finding: OnFinding,
         stop_event: threading.Event | None = None,
+        on_warning: OnWarning | None = None,
     ) -> int:
         """Run a scan to completion (blocking).
 
         Invokes `on_finding` for each normalized Finding as it is produced, so
         callers can observe results while the scan is still running. Returns the
         process exit code. `stop_event`, if set mid-run, requests early
-        termination.
+        termination. `on_warning`, if provided, receives non-fatal issues (e.g.
+        a malformed output line) that are skipped rather than aborting the scan.
         """

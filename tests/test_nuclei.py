@@ -84,11 +84,30 @@ class NucleiScannerTests(unittest.TestCase):
             scanner.run(Target("http://127.0.0.1"), ScanConfig(), lambda _: None)
         self.assertEqual(raised.exception.exit_code, 7)
 
-    def test_invalid_jsonl_raises(self) -> None:
-        scanner = ScriptedNucleiScanner("print('not-json', flush=True)")
+    def test_invalid_jsonl_is_skipped_and_warned(self) -> None:
+        # A malformed line must not abort the scan: it is skipped, recorded as a
+        # warning, and a following valid line is still delivered.
+        good = json.dumps({"template-id": "ok", "info": {"severity": "info"}})
+        script = (
+            "print('not-json', flush=True)\n"
+            f"print({json.dumps(good)}, flush=True)"
+        )
+        scanner = ScriptedNucleiScanner(script)
+        findings = []
+        warnings = []
 
-        with self.assertRaisesRegex(RuntimeError, "invalid JSONL"):
-            scanner.run(Target("http://127.0.0.1"), ScanConfig(), lambda _: None)
+        exit_code = scanner.run(
+            Target("http://127.0.0.1"),
+            ScanConfig(),
+            findings.append,
+            on_warning=warnings.append,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "ok")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("invalid JSONL", warnings[0])
 
     def test_stop_terminates_process_with_no_stdout(self) -> None:
         scanner = ScriptedNucleiScanner("import time; time.sleep(30)")
