@@ -1,7 +1,14 @@
 import unittest
 
-from dast_harness import ScanRunner, ScannerExecutionError, ScanStatus, Target
+from dast_harness import ScanOutcome, ScanRunner, ScanStatus, Target
 from dast_harness.scanners.base import Scanner
+
+
+def _outcome(exit_code, **kw):
+    base = dict(output_present=True, output_parseable=True, parsed_records=0,
+               invalid_records=0, fatal=False, stopped=False)
+    base.update(kw)
+    return ScanOutcome(exit_code=exit_code, **base)
 
 
 class ExitScanner(Scanner):
@@ -13,32 +20,35 @@ class ExitScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
-        return self.exit_code
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        return _outcome(self.exit_code)
 
 
 class ErrorScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         raise RuntimeError("scanner exploded")
 
 
 class ProcessErrorScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
-        raise ScannerExecutionError("scanner exited with code 9", 9)
+    # A scanner that reports a nonzero exit via the outcome (not by raising).
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        return _outcome(9, fatal=True)
 
 
 class BlockingScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         assert stop_event is not None
         stop_event.wait(timeout=2)
-        return -15 if stop_event.is_set() else 0
+        if stop_event.is_set():
+            return _outcome(-15, stopped=True)
+        return _outcome(0)
 
 
 class WarningScanner(ExitScanner):
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         if on_warning is not None:
             on_warning("skipped a bad line")
-        return 0
+        return _outcome(0, invalid_records=1)
 
 
 class ScanRunnerTests(unittest.TestCase):
@@ -78,7 +88,7 @@ class ScanRunnerTests(unittest.TestCase):
 
         self.assertEqual(status["status"], ScanStatus.FAILED.value)
         self.assertEqual(status["exit_code"], 9)
-        self.assertEqual(status["error"], "scanner exited with code 9")
+        self.assertIn("exited with code 9", status["error"])
 
     def test_stop_marks_scan_stopped(self) -> None:
         runner = ScanRunner(BlockingScanner(0))
@@ -90,13 +100,14 @@ class ScanRunnerTests(unittest.TestCase):
         self.assertEqual(status["status"], ScanStatus.STOPPED.value)
         self.assertEqual(status["exit_code"], -15)
 
-    def test_warnings_do_not_fail_a_scan(self) -> None:
+    def test_warnings_yield_completed_with_warnings(self) -> None:
         runner = ScanRunner(WarningScanner(0))
         scan_id = runner.start_scan(Target("http://127.0.0.1"))
 
         status = runner.wait(scan_id, timeout=2)
 
-        self.assertEqual(status["status"], ScanStatus.COMPLETED.value)
+        # non-fatal parse warnings -> COMPLETED_WITH_WARNINGS, still not a failure
+        self.assertEqual(status["status"], ScanStatus.COMPLETED_WITH_WARNINGS.value)
         self.assertEqual(status["warnings_count"], 1)
         self.assertEqual(runner.get_warnings(scan_id), ["skipped a bad line"])
 

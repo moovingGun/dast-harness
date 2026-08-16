@@ -10,9 +10,17 @@ import threading
 import time
 import uuid
 
-from .models import ScanConfig, ScanState, ScanStatus, Target, Finding
+from .models import (
+    CompletionEvidence,
+    Finding,
+    ScanConfig,
+    ScanOutcome,
+    ScanState,
+    ScanStatus,
+    Target,
+)
 from .safety import authorize_target
-from .scanners.base import Scanner, ScannerExecutionError
+from .scanners.base import Scanner
 
 
 class ScanRunner:
@@ -52,46 +60,81 @@ class ScanRunner:
         thread.start()
         return scan_id
 
+    @staticmethod
+    def _status_from_outcome(
+        outcome: ScanOutcome, stop_effective: bool
+    ) -> ScanStatus:
+        if stop_effective:
+            return ScanStatus.STOPPED
+        if outcome.fatal or (outcome.exit_code is not None and outcome.exit_code != 0):
+            return ScanStatus.FAILED
+        if outcome.invalid_records > 0:
+            return ScanStatus.COMPLETED_WITH_WARNINGS
+        return ScanStatus.COMPLETED
+
     def _run(
         self, state: ScanState, config: ScanConfig, stop_event: threading.Event
     ) -> None:
         state.mark_running(time.time())
-        code: int | None = None
-        status = ScanStatus.FAILED
-        error: str | None = None
+        started_at = state.started_at
+        run_error: str | None = None
+        outcome: ScanOutcome | None = None
         try:
-            code = self.scanner.run(
+            outcome = self.scanner.run(
                 state.target,
                 config,
                 state.add_finding,
                 stop_event,
                 state.add_warning,
             )
-            if stop_event.is_set():
-                status = ScanStatus.STOPPED
-                error = None
-            elif code == 0:
-                status = ScanStatus.COMPLETED
-                error = None
-            else:
-                status = ScanStatus.FAILED
-                error = f"{self.scanner.name} exited with code {code}"
         except Exception as exc:  # noqa: BLE001 - record any scanner failure
-            if isinstance(exc, ScannerExecutionError):
-                code = exc.exit_code
-            if stop_event.is_set():
-                status = ScanStatus.STOPPED
-                error = None
-            else:
-                status = ScanStatus.FAILED
-                error = str(exc)
-        finally:
-            state.mark_finished(
-                status,
-                time.time(),
-                exit_code=code,
-                error=error,
+            run_error = str(exc)
+
+        finished_at = time.time()
+        if outcome is None:
+            # run() raised: still record what we can as fatal evidence.
+            outcome = ScanOutcome(
+                exit_code=None, output_present=False, output_parseable=False,
+                fatal=True, error=run_error,
             )
+
+        stop_effective = bool(outcome.stopped)
+        status = self._status_from_outcome(outcome, stop_effective)
+        evidence_error = outcome.error or run_error
+        if status == ScanStatus.FAILED and not evidence_error:
+            if outcome.exit_code not in (0, None):
+                evidence_error = (
+                    f"{self.scanner.name} exited with code {outcome.exit_code}"
+                )
+            else:
+                evidence_error = f"{self.scanner.name} failed"
+
+        state.record_evidence(
+            CompletionEvidence(
+                scanner=self.scanner.name,
+                scanner_version=outcome.scanner_version,
+                started_at=started_at,
+                finished_at=finished_at,
+                exit_code=outcome.exit_code,
+                stop_requested=state.stop_requested,
+                stop_effective=stop_effective,
+                output_present=outcome.output_present,
+                output_parseable=outcome.output_parseable,
+                parsed_records=outcome.parsed_records,
+                invalid_records=outcome.invalid_records,
+                warnings_count=len(state.warnings()),
+                findings_count=len(state.findings()),
+                config=config.snapshot(),
+                template_version=outcome.template_version,
+                error=evidence_error,
+            )
+        )
+        state.mark_finished(
+            status,
+            finished_at,
+            exit_code=outcome.exit_code,
+            error=evidence_error if status == ScanStatus.FAILED else None,
+        )
 
     def _get(self, scan_id: str) -> ScanState:
         with self._lock:
@@ -113,6 +156,9 @@ class ScanRunner:
         with self._lock:
             event = self._stop_events.get(scan_id)
         if event is not None and state.is_active():
+            # Only running scanners get the stop signal; finished ones are left
+            # as-is so their COMPLETED status and results are preserved.
+            state.mark_stop_requested()
             event.set()
 
     def wait(self, scan_id: str, timeout: float | None = None) -> dict:

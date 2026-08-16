@@ -7,7 +7,6 @@ import unittest
 from dast_harness import (
     NucleiScanner,
     ScanConfig,
-    ScannerExecutionError,
     Severity,
     Target,
 )
@@ -76,24 +75,22 @@ class NucleiScannerTests(unittest.TestCase):
         scanner = ScriptedNucleiScanner(script)
         findings = []
 
-        exit_code = scanner.run(
+        outcome = scanner.run(
             Target("http://127.0.0.1"), ScanConfig(), findings.append
         )
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.parsed_records, 1)
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_id, "missing-header")
         self.assertEqual(findings[0].severity, Severity.LOW)
         self.assertEqual(findings[0].raw, payload)
 
-    def test_nonzero_exit_without_stderr_raises(self) -> None:
+    def test_nonzero_exit_reported_in_outcome(self) -> None:
         scanner = ScriptedNucleiScanner("raise SystemExit(7)")
 
-        with self.assertRaisesRegex(
-            ScannerExecutionError, "exited with code 7"
-        ) as raised:
-            scanner.run(Target("http://127.0.0.1"), ScanConfig(), lambda _: None)
-        self.assertEqual(raised.exception.exit_code, 7)
+        outcome = scanner.run(Target("http://127.0.0.1"), ScanConfig(), lambda _: None)
+        self.assertEqual(outcome.exit_code, 7)
 
     def test_invalid_jsonl_is_skipped_and_warned(self) -> None:
         # A malformed line must not abort the scan: it is skipped, recorded as a
@@ -107,14 +104,16 @@ class NucleiScannerTests(unittest.TestCase):
         findings = []
         warnings = []
 
-        exit_code = scanner.run(
+        outcome = scanner.run(
             Target("http://127.0.0.1"),
             ScanConfig(),
             findings.append,
             on_warning=warnings.append,
         )
 
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(outcome.exit_code, 0)
+        self.assertEqual(outcome.parsed_records, 1)
+        self.assertEqual(outcome.invalid_records, 1)
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_id, "ok")
         self.assertEqual(len(warnings), 1)
@@ -127,7 +126,7 @@ class NucleiScannerTests(unittest.TestCase):
         timer.start()
         started = time.monotonic()
         try:
-            exit_code = scanner.run(
+            outcome = scanner.run(
                 Target("http://127.0.0.1"),
                 ScanConfig(),
                 lambda _: None,
@@ -136,7 +135,7 @@ class NucleiScannerTests(unittest.TestCase):
         finally:
             timer.cancel()
 
-        self.assertNotEqual(exit_code, 0)
+        self.assertTrue(outcome.stopped)
         self.assertLess(time.monotonic() - started, 3)
 
 

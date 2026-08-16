@@ -1,6 +1,15 @@
 """Minimal DAST harness around a single scanner (nuclei)."""
 
-from .models import Finding, ScanConfig, ScanState, ScanStatus, Severity, Target
+from .models import (
+    CompletionEvidence,
+    Finding,
+    ScanConfig,
+    ScanOutcome,
+    ScanState,
+    ScanStatus,
+    Severity,
+    Target,
+)
 from .reporters import ConsoleReporter, JSONReporter, Reporter, ScanReport, build_report
 from .orchestrator import MultiScanRunner
 from .runner import ScanRunner
@@ -12,6 +21,8 @@ from .scanners.nuclei import NucleiScanner
 __all__ = [
     "Finding",
     "ScanConfig",
+    "ScanOutcome",
+    "CompletionEvidence",
     "ScanState",
     "ScanStatus",
     "Severity",

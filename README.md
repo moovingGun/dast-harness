@@ -13,12 +13,17 @@ dast_harness/
   scanners/base.py   # Scanner 추상 인터페이스
   scanners/nuclei.py # nuclei 실행 + JSONL 스트리밍 파싱 → Finding 정규화
   scanners/nikto.py  # nikto 실행 + 종료 후 JSON 파일 파싱 → Finding 정규화
-  runner.py          # start_scan / get_status / get_results / stop_scan / wait
+  runner.py          # 단일 스캐너: start_scan / get_status / get_results / stop_scan / wait
+  orchestrator.py    # MultiScanRunner: 여러 스캐너 병렬 실행 + 롤업/병합
   reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
   reporters/json_reporter.py     # findings → JSON 문자열
   reporters/console_reporter.py  # 심각도별 콘솔 요약
-example.py           # 사용 예시
+example.py           # 단일 스캐너 예시
+example_multi.py     # 다중 스캐너 예시
 ```
+
+각 스캔은 완료 증거(`CompletionEvidence`: 종료코드·파싱 계정·버전·중단 여부 등)를
+스캐너별로 기록하며, `get_status`의 `evidence` 필드로 조회된다.
 
 ## 스캐너 (scanners/)
 
@@ -47,14 +52,36 @@ runner.wait(scan_id)
 print(ConsoleReporter().render(build_report(runner, scan_id)))
 ```
 
-- `get_status`는 롤업 상태와 스캐너별 breakdown을 함께 준다. 롤업 규칙:
-  - `running` — 하나라도 진행 중
-  - `completed` — 전부 완료
-  - `partial` — 일부만 완료(나머지 실패/중단) → 결과가 일부 존재
-  - `stopped` — 완료 0개 + 중단 있음
-  - `failed` — 완료 0개 + 전부 실패
+- `get_status`는 롤업 상태와 스캐너별 breakdown, `results_partial`을 함께 준다.
 - `get_results`/`get_warnings`는 전 스캐너 결과를 병합한다(경고는 `[scanner]` 접두).
 - `example_multi.py` 참고.
+
+#### 상태 규칙
+
+**스캐너별 상태** (`ScanRunner`, 위→아래 우선):
+
+| 조건 | 상태 |
+|---|---|
+| 사용자 중단이 실제 적용됨 (stop_effective) | `stopped` |
+| fatal 파싱오류 또는 종료코드 ∉ {0, None} | `failed` |
+| 비치명적 파싱 경고 존재(invalid_records > 0), 결과 사용 가능 | `completed_with_warnings` |
+| 종료코드 0 · 출력/파일 정상 파싱 · 경고 없음 | `completed` |
+
+**다중 롤업** (`MultiScanRunner`, 위→아래 우선):
+
+| 조건 | 상태 |
+|---|---|
+| 하나라도 진행 중 | `running` |
+| 하나라도 실제 중단됨 (중단 우선) | `stopped` |
+| 전부 성공, 하나라도 경고 | `completed_with_warnings` |
+| 전부 성공(완료) | `completed` |
+| 일부 성공 · 일부 실패 | `partial` |
+| 전부 실패 | `failed` |
+
+성공 = {`completed`, `completed_with_warnings`}. 이미 완료된 스캐너는 그룹 중단 후에도
+`completed`와 결과를 유지하며, 실행 중 스캐너에만 중단 신호가 전달된다. **모두 완료된
+뒤의 `stop_scan()`은 no-op**으로, 기존 완료 상태를 그대로 둔다.
+`results_partial` = 전체 상태가 성공(위 두 상태) 이외일 때 `True`.
 
 ## 리포팅 (reporters/)
 
@@ -69,6 +96,10 @@ print(ConsoleReporter().render(report))          # 콘솔 요약
 open("results.json", "w").write(JSONReporter().render(report))  # JSON 저장
 ```
 
+JSON 리포트에는 전체 상태·`results_partial`·스캐너별 상태/오류/완료 증거·findings·
+warnings가 포함된다. `raw`(스캐너 원본)는 각 `Finding`에 **내부적으로 항상 보존**되며,
+출력에는 `JSONReporter(include_raw=True)`일 때만 실린다(기본 `False`, 안전).
+
 ## 안전장치 (safety.py)
 
 `ScanRunner.start_scan()`은 스캐너 프로세스가 뜨기 전에 `authorize_target()`을
@@ -80,15 +111,22 @@ open("results.json", "w").write(JSONReporter().render(report))  # JSON 저장
 사설망과 link-local 주소도 기본적으로 거부한다. 임의의 DNS 이름은 Nuclei 실행 시
 다시 해석될 수 있으므로 `localhost` 이외에는 명시적 allowlist가 필요하다.
 
-### 런타임 하드닝 (nuclei 실행 옵션)
+### 런타임 하드닝 (스캐너 실행 옵션)
 
-URL 인증만으로는 못 막는 nuclei 런타임 동작을 기본값으로 차단한다.
+URL 인증만으로는 못 막는 스캐너 런타임 동작을 기본값으로 차단한다.
 
+nuclei:
 - **`-disable-redirects` (항상)**: 로컬 대상이 공인 URL로 리다이렉트해 스캔을
   비인가 호스트로 유도하는 것을 결정적으로 차단한다. 끌 수 없는 안전 불변값.
 - **`-no-interactsh` (기본)**: OAST 콜백을 위해 외부 interactsh 서버와 통신하는
   것을 막아 스캔을 로컬로 격리한다. blind/OOB 탐지가 필요하면
   `ScanConfig(enable_interactsh=True)`로 켤 수 있다(외부 통신 발생).
+- **`-disable-update-check` (항상)**: 시작 시 nuclei/템플릿 업데이트 확인용 외부
+  통신을 차단한다.
+
+nikto:
+- **`-nocheck` (항상)**: 시작 시 외부 업데이트 확인을 차단한다.
+- **`-ask no` (항상)**: 업데이트 제출 프롬프트를 띄우지 않는다.
 
 ## 실행 (macOS 등 nuclei 설치 환경)
 

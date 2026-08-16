@@ -8,12 +8,17 @@ names as ScanRunner, so `build_report` and the reporters work unchanged.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 from .models import Finding, ScanConfig, ScanStatus, Target
 from .runner import ScanRunner
 from .safety import authorize_target
 from .scanners.base import Scanner
+
+# One short, shared grace window for settling stopped scanners (cleanup and
+# rollback). Shared, never multiplied per scanner.
+_STOP_GRACE = 2.0
 
 
 class MultiScanRunner:
@@ -37,13 +42,28 @@ class MultiScanRunner:
         authorize_target(target.url, self.allowlist)  # may raise
 
         group_id = uuid.uuid4().hex[:12]
-        mapping = {
-            name: runner.start_scan(target, config)
-            for name, runner in self._runners.items()
-        }
+        # Start children one at a time, tracking what we started, so a later
+        # start failure can roll back the ones already running (no orphans).
+        started: dict[str, str] = {}
+        try:
+            for name, runner in self._runners.items():
+                started[name] = runner.start_scan(target, config)
+        except Exception:
+            self._stop_and_reap(started)
+            raise
         with self._lock:
-            self._groups[group_id] = mapping
+            self._groups[group_id] = started
         return group_id
+
+    def _stop_and_reap(self, mapping: dict[str, str]) -> None:
+        """Stop the given child scans and wait for them within one shared grace
+        deadline (not per-child)."""
+        for name, child_id in mapping.items():
+            self._runners[name].stop_scan(child_id)
+        deadline = time.monotonic() + _STOP_GRACE
+        for name, child_id in mapping.items():
+            remaining = max(0.0, deadline - time.monotonic())
+            self._runners[name].wait(child_id, remaining)
 
     def _mapping(self, group_id: str) -> dict[str, str]:
         with self._lock:
@@ -55,23 +75,30 @@ class MultiScanRunner:
     def _rollup(statuses: list[str]) -> str:
         """Combine per-scanner statuses into one overall status.
 
-        running  : any scanner still active
-        completed: every scanner completed
-        partial  : some completed, some did not (failed/stopped) — results exist
-        stopped  : none completed, at least one was stopped
-        failed   : none completed, all failed
+        running                 : any scanner still active
+        stopped                 : an effective user stop dominates
+        completed               : every scanner completed cleanly
+        completed_with_warnings : all succeeded, at least one had warnings
+        partial                 : some succeeded, some failed (results exist)
+        failed                  : none succeeded
         """
+        succeeded = {
+            ScanStatus.COMPLETED.value,
+            ScanStatus.COMPLETED_WITH_WARNINGS.value,
+        }
         active = {ScanStatus.PENDING.value, ScanStatus.RUNNING.value}
         if any(s in active for s in statuses):
             return ScanStatus.RUNNING.value
-
-        completed = sum(s == ScanStatus.COMPLETED.value for s in statuses)
-        if completed == len(statuses):
-            return ScanStatus.COMPLETED.value
-        if completed:
-            return ScanStatus.PARTIAL.value
         if any(s == ScanStatus.STOPPED.value for s in statuses):
             return ScanStatus.STOPPED.value
+
+        ok = [s for s in statuses if s in succeeded]
+        if len(ok) == len(statuses):
+            if any(s == ScanStatus.COMPLETED_WITH_WARNINGS.value for s in statuses):
+                return ScanStatus.COMPLETED_WITH_WARNINGS.value
+            return ScanStatus.COMPLETED.value
+        if ok:
+            return ScanStatus.PARTIAL.value
         return ScanStatus.FAILED.value
 
     def get_status(self, group_id: str) -> dict:
@@ -81,12 +108,18 @@ class MultiScanRunner:
             for name, child_id in mapping.items()
         }
         overall = self._rollup([p["status"] for p in per.values()])
+        clean = {
+            ScanStatus.COMPLETED.value,
+            ScanStatus.COMPLETED_WITH_WARNINGS.value,
+        }
+        results_partial = any(p["status"] not in clean for p in per.values())
 
         first = next(iter(per.values()))
         return {
             "scan_id": group_id,
             "target": first["target"],
             "status": overall,
+            "results_partial": results_partial,
             "exit_code": None,  # not meaningful across multiple processes
             "findings_count": sum(p.get("findings_count", 0) for p in per.values()),
             "warnings_count": sum(p.get("warnings_count", 0) for p in per.values()),
@@ -114,7 +147,23 @@ class MultiScanRunner:
             self._runners[name].stop_scan(child_id)
 
     def wait(self, group_id: str, timeout: float | None = None) -> dict:
+        """Wait for the group. `timeout` is a single deadline for the whole
+        group, not a per-scanner budget. On deadline expiry with scanners still
+        running, they are stopped so the group settles."""
         mapping = self._mapping(group_id)
+        deadline = None if timeout is None else time.monotonic() + timeout
         for name, child_id in mapping.items():
-            self._runners[name].wait(child_id, timeout)
+            remaining = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            self._runners[name].wait(child_id, remaining)
+
+        # On deadline expiry, ask still-running scanners to stop and give them a
+        # single shared grace window. Scanners that ignore the stop stay RUNNING
+        # (honestly), rather than being falsely reported STOPPED.
+        if (
+            deadline is not None
+            and self.get_status(group_id)["status"] == ScanStatus.RUNNING.value
+        ):
+            self._stop_and_reap(mapping)
         return self.get_status(group_id)

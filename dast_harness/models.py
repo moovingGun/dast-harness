@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -32,6 +32,8 @@ class ScanStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     STOPPED = "stopped"
+    # A scan that completed but had non-fatal parse warnings (usable results).
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     # Multi-scanner rollup only: some scanners completed, others did not.
     # A single scan never reaches this state.
     PARTIAL = "partial"
@@ -63,6 +65,63 @@ class ScanConfig:
         if self.request_timeout is not None and self.request_timeout <= 0:
             raise ValueError("request_timeout must be greater than zero")
 
+    def snapshot(self) -> dict[str, Any]:
+        """A JSON-safe copy of this config, for completion evidence."""
+        return {
+            "severities": [s.value for s in self.severities],
+            "tags": list(self.tags),
+            "template_ids": list(self.template_ids),
+            "rate_limit": self.rate_limit,
+            "request_timeout": self.request_timeout,
+            "enable_interactsh": self.enable_interactsh,
+        }
+
+
+@dataclass
+class ScanOutcome:
+    """What a scanner's run() reports back, beyond the findings it streamed.
+
+    The runner turns this (plus stop state) into a per-scanner ScanStatus and a
+    CompletionEvidence record. `fatal` forces FAILED regardless of exit code
+    (e.g. a required output file was missing or unparseable).
+    """
+
+    exit_code: int | None
+    output_present: bool
+    output_parseable: bool
+    parsed_records: int = 0
+    invalid_records: int = 0
+    fatal: bool = False
+    stopped: bool = False
+    scanner_version: str | None = None
+    template_version: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class CompletionEvidence:
+    """Per-scanner proof of what actually happened, recorded on the scan state."""
+
+    scanner: str
+    scanner_version: str | None
+    started_at: float | None
+    finished_at: float | None
+    exit_code: int | None
+    stop_requested: bool
+    stop_effective: bool
+    output_present: bool
+    output_parseable: bool
+    parsed_records: int
+    invalid_records: int
+    warnings_count: int
+    findings_count: int
+    config: dict
+    template_version: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class Finding:
@@ -90,6 +149,8 @@ class ScanState:
     exit_code: int | None = None
     error: str | None = None
     authorization_reason: str = ""
+    stop_requested: bool = False
+    evidence: "CompletionEvidence | None" = None
     _findings: list[Finding] = field(default_factory=list)
     _warnings: list[str] = field(default_factory=list)
     _warnings_total: int = 0
@@ -132,6 +193,14 @@ class ScanState:
         with self._lock:
             return self.status in (ScanStatus.PENDING, ScanStatus.RUNNING)
 
+    def mark_stop_requested(self) -> None:
+        with self._lock:
+            self.stop_requested = True
+
+    def record_evidence(self, evidence: "CompletionEvidence") -> None:
+        with self._lock:
+            self.evidence = evidence
+
     def findings(self) -> list[Finding]:
         """Return a snapshot copy so callers can poll safely mid-scan."""
         with self._lock:
@@ -156,4 +225,6 @@ class ScanState:
                 "authorization_reason": self.authorization_reason,
                 "findings_count": len(self._findings),
                 "warnings_count": self._warnings_total,
+                "stop_requested": self.stop_requested,
+                "evidence": self.evidence.to_dict() if self.evidence else None,
             }

@@ -5,6 +5,7 @@ from dast_harness import (
     Finding,
     MultiScanRunner,
     ScanConfig,
+    ScanOutcome,
     ScanStatus,
     Severity,
     Target,
@@ -12,6 +13,13 @@ from dast_harness import (
 )
 from dast_harness.safety import TargetNotAuthorizedError
 from dast_harness.scanners.base import Scanner
+
+
+def _ok(**kw):
+    base = dict(exit_code=0, output_present=True, output_parseable=True,
+               parsed_records=0, invalid_records=0, fatal=False, stopped=False)
+    base.update(kw)
+    return ScanOutcome(**base)
 
 
 class FindingScanner(Scanner):
@@ -22,12 +30,12 @@ class FindingScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         for i in range(self.count):
             on_finding(
                 Finding(self.name, f"{self.name}-{i}", "x", Severity.HIGH, target.url)
             )
-        return 0
+        return _ok(parsed_records=self.count)
 
 
 class FailScanner(Scanner):
@@ -36,7 +44,7 @@ class FailScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         raise RuntimeError("boom")
 
 
@@ -46,10 +54,10 @@ class WarnScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         if on_warning is not None:
             on_warning("something odd")
-        return 0
+        return _ok(invalid_records=1)
 
 
 class ControlledScanner(Scanner):
@@ -65,7 +73,7 @@ class ControlledScanner(Scanner):
     def is_available(self) -> bool:
         return True
 
-    def run(self, target, config, on_finding, stop_event=None, on_warning=None) -> int:
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
         for i in range(self._findings):
             on_finding(
                 Finding(self.name, f"{self.name}-{i}", "x", Severity.HIGH, target.url)
@@ -73,9 +81,10 @@ class ControlledScanner(Scanner):
         self.entered.set()
         while not self.release.is_set():
             if stop_event is not None and stop_event.is_set():
-                return -15
+                return _ok(exit_code=-15, output_present=False,
+                           output_parseable=False, stopped=True)
             self.release.wait(timeout=0.01)
-        return 0
+        return _ok(parsed_records=self._findings)
 
 
 class RollupTests(unittest.TestCase):
@@ -97,12 +106,14 @@ class RollupTests(unittest.TestCase):
         self.assertRollup([self.C, self.R], ScanStatus.RUNNING.value)
         self.assertRollup([self.P, self.F], ScanStatus.RUNNING.value)
 
-    def test_some_completed_some_not_is_partial(self) -> None:
+    def test_some_completed_some_failed_is_partial(self) -> None:
         self.assertRollup([self.C, self.F], ScanStatus.PARTIAL.value)
-        self.assertRollup([self.C, self.S], ScanStatus.PARTIAL.value)
-        self.assertRollup([self.C, self.F, self.S], ScanStatus.PARTIAL.value)
 
-    def test_none_completed_with_stop_is_stopped(self) -> None:
+    def test_effective_stop_dominates(self) -> None:
+        # An effective stop makes the whole group STOPPED, even alongside a
+        # completed child.
+        self.assertRollup([self.C, self.S], ScanStatus.STOPPED.value)
+        self.assertRollup([self.C, self.F, self.S], ScanStatus.STOPPED.value)
         self.assertRollup([self.S, self.S], ScanStatus.STOPPED.value)
         self.assertRollup([self.F, self.S], ScanStatus.STOPPED.value)
 
@@ -152,7 +163,7 @@ class MultiScanRunnerConcurrencyTests(unittest.TestCase):
         status = runner.wait(scan_id, timeout=2)
         self.assertEqual(status["status"], "stopped")
 
-    def test_completed_plus_stopped_rolls_up_to_partial(self) -> None:
+    def test_completed_plus_stopped_rolls_up_to_stopped(self) -> None:
         done = FindingScanner("done", 1)      # finishes immediately
         blocked = ControlledScanner("blocked")
         runner = MultiScanRunner([done, blocked])
@@ -161,8 +172,8 @@ class MultiScanRunnerConcurrencyTests(unittest.TestCase):
 
         runner.stop_scan(scan_id)             # only 'blocked' is still active
         status = runner.wait(scan_id, timeout=2)
-        # one completed before the stop -> results exist -> partial, not stopped
-        self.assertEqual(status["status"], "partial")
+        # an effective stop dominates the rollup, but the completed child is kept
+        self.assertEqual(status["status"], "stopped")
         self.assertEqual(status["scanners"]["done"]["status"], "completed")
         self.assertEqual(status["scanners"]["blocked"]["status"], "stopped")
 

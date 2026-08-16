@@ -7,18 +7,26 @@ import json
 from ..models import Finding
 from .base import Reporter, ScanReport
 
+_CLEAN = {"completed", "completed_with_warnings"}
+
 
 class JSONReporter(Reporter):
     name = "json"
 
-    def __init__(self, indent: int | None = 2) -> None:
+    def __init__(self, indent: int | None = 2, include_raw: bool = False) -> None:
+        # include_raw defaults to False: raw scanner output can be large and may
+        # echo response bodies, so it is preserved internally on every Finding
+        # but only emitted when the caller explicitly opts in.
         self.indent = indent
+        self.include_raw = include_raw
 
     def render(self, report: ScanReport) -> str:
         s = report.status
+        results_partial = s.get("results_partial", s.get("status") not in _CLEAN)
         payload = {
             "target": s.get("target"),
             "status": s.get("status"),
+            "results_partial": results_partial,
             "started_at": s.get("started_at"),
             "finished_at": s.get("finished_at"),
             "exit_code": s.get("exit_code"),
@@ -26,14 +34,14 @@ class JSONReporter(Reporter):
             "severity_counts": report.severity_counts(),
             "findings_count": len(report.findings),
             "warnings_count": s.get("warnings_count", len(report.warnings)),
+            "scanners": s.get("scanners"),  # per-scanner status/error/evidence
             "findings": [self._finding_dict(f) for f in report.sorted_findings()],
             "warnings": report.warnings,
         }
         return json.dumps(payload, indent=self.indent, ensure_ascii=False)
 
-    @staticmethod
-    def _finding_dict(f: Finding) -> dict:
-        return {
+    def _finding_dict(self, f: Finding) -> dict:
+        out = {
             "scanner": f.scanner,
             "id": f.finding_id,
             "name": f.name,
@@ -42,3 +50,6 @@ class JSONReporter(Reporter):
             "description": f.description,
             "tags": f.tags,
         }
+        if self.include_raw:
+            out["raw"] = f.raw
+        return out
