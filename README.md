@@ -12,12 +12,26 @@ dast_harness/
   safety.py          # 로컬/허가 대상 검증 (스캔 전 강제 choke point)
   scanners/base.py   # Scanner 추상 인터페이스
   scanners/nuclei.py # nuclei 실행 + JSONL 스트리밍 파싱 → Finding 정규화
+  scanners/nikto.py  # nikto 실행 + 종료 후 JSON 파일 파싱 → Finding 정규화
   runner.py          # start_scan / get_status / get_results / stop_scan / wait
   reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
   reporters/json_reporter.py     # findings → JSON 문자열
   reporters/console_reporter.py  # 심각도별 콘솔 요약
 example.py           # 사용 예시
 ```
+
+## 스캐너 (scanners/)
+
+같은 `Scanner` 인터페이스 뒤에 여러 도구를 꽂는다. `ScanRunner`와 안전장치·리포팅은
+스캐너를 몰라도 된다.
+
+- **nuclei**: 실행 중 stdout으로 JSONL을 **스트리밍** → 결과를 실시간 관측.
+- **nikto**: 종료 시 JSON **파일 하나**를 씀 → 완료 후 파싱해 일괄 전달. Nikto는
+  severity 개념이 없어 모든 finding이 `Severity.UNKNOWN`이다. nuclei 전용
+  `ScanConfig` 필드(severities/tags/template_ids)는 무시하고 맞는 것만 사용한다.
+
+여러 스캐너 결과는 각 `Finding`의 `scanner` 필드로 출처가 구분되며, `Finding` 리스트를
+합치면 하나의 리포트로 병합된다.
 
 ## 리포팅 (reporters/)
 

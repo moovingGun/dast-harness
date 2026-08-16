@@ -5,6 +5,7 @@ from .reporters import ConsoleReporter, JSONReporter, Reporter, ScanReport, buil
 from .runner import ScanRunner
 from .safety import TargetNotAuthorizedError, authorize_target
 from .scanners.base import ScannerExecutionError
+from .scanners.nikto import NiktoScanner
 from .scanners.nuclei import NucleiScanner
 
 __all__ = [
@@ -17,6 +18,7 @@ __all__ = [
     "ScanRunner",
     "ScannerExecutionError",
     "NucleiScanner",
+    "NiktoScanner",
     "authorize_target",
     "TargetNotAuthorizedError",
     "Reporter",
