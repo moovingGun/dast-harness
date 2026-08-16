@@ -8,6 +8,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -19,33 +20,56 @@ OnWarning = Callable[[str], None]
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _group_alive(pgid: int) -> bool:
+    """True if the process group still has at least one member."""
+    try:
+        os.killpg(pgid, 0)  # signal 0 = existence check
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True  # exists but not signalable by us
+
+
 def stop_process_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
     """Terminate a scanner and any children it spawned.
 
     The process must have been started with ``start_new_session=True`` so it
-    leads its own group; we signal the whole group (SIGTERM, then SIGKILL after
-    a grace period) so no child survives. Races with an already-exited process
-    or a vanished group are swallowed.
+    leads its own group; we SIGTERM the whole group, then escalate to SIGKILL if
+    *any* group member is still alive after the grace window — not just if the
+    leader is. This matters because SIGTERM is catchable: a child that ignores
+    it would otherwise survive when the leader exits promptly. Races with an
+    already-exited process or a vanished group are swallowed.
     """
-    if proc.poll() is not None:
-        return
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        return
+    # With start_new_session the leader's pgid == its pid; keep the pid even if
+    # the leader exits (the group id stays valid while members remain).
+    pgid = proc.pid
     try:
         os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, OSError):
+        # group already empty; still reap the leader if needed
+        _reap(proc, grace)
         return
-    try:
-        proc.wait(timeout=grace)
-        return
-    except subprocess.TimeoutExpired:
-        pass
+
+    # Wait for the whole group to drain, not just the leader. Reap the leader as
+    # soon as it exits so its zombie entry doesn't keep the group "alive".
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _reap(proc, 1.0)
+        if not _group_alive(pgid):
+            return
+        time.sleep(0.05)
+
+    # Survivors remain (e.g. a SIGTERM-ignoring child) -> force kill the group.
     try:
         os.killpg(pgid, signal.SIGKILL)
     except (ProcessLookupError, OSError):
         pass
+    _reap(proc, grace)
+
+
+def _reap(proc: subprocess.Popen, grace: float) -> None:
     try:
         proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:

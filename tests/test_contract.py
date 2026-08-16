@@ -6,6 +6,7 @@ a ScanOutcome (the new Scanner.run contract).
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -535,6 +536,13 @@ def _alive(pid):
         return True
 
 
+def _force_kill(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
 class ProcessGroupStopTests(unittest.TestCase):
     def _assert_stop_kills_grandchild(self, make_scanner):
         with tempfile.TemporaryDirectory() as d:
@@ -573,6 +581,52 @@ class ProcessGroupStopTests(unittest.TestCase):
 
     def test_nikto_stop_kills_grandchild(self):
         self._assert_stop_kills_grandchild(ScriptedNikto)
+
+    def test_sigterm_ignoring_member_is_sigkilled(self):
+        # A group member that ignores SIGTERM must still be SIGKILLed even when
+        # the leader exits promptly on SIGTERM.
+        from dast_harness.scanners.base import stop_process_group
+
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = os.path.join(d, "gc.pid")
+            # The grandchild writes its pid ONLY after installing SIG_IGN, so the
+            # test never signals before the handler is in place (avoids a race).
+            deaf_child = (
+                "import os, signal, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                "open(%r, 'w').write(str(os.getpid()))\n"
+                "time.sleep(300)\n"
+            ) % pidfile
+            leader = (
+                "import subprocess, sys, time\n"
+                "subprocess.Popen([sys.executable, '-c', %r])\n"
+                "time.sleep(300)\n"
+            ) % deaf_child
+            proc = subprocess.Popen(
+                [sys.executable, "-c", leader], start_new_session=True
+            )
+            txt = ""
+            for _ in range(250):
+                try:
+                    with open(pidfile) as fh:
+                        txt = fh.read().strip()
+                    if txt:
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.02)
+            gpid = int(txt)
+            self.addCleanup(_force_kill, gpid)  # never leave an orphan behind
+            self.assertTrue(_alive(gpid), "deaf grandchild should be running")
+
+            # leader dies fast on SIGTERM; the deaf child ignores it and must be
+            # escalated to SIGKILL within the grace window.
+            stop_process_group(proc, grace=1.0)
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and _alive(gpid):
+                time.sleep(0.05)
+            self.assertFalse(_alive(gpid), "SIGTERM-ignoring member survived stop")
 
 
 # --------------------------------------------------------------------------
