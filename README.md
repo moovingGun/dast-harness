@@ -1,5 +1,9 @@
 # dast-harness
 
+[![CI](https://github.com/moovingGun/dast-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/moovingGun/dast-harness/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+
 여러 스캐너를 같은 인터페이스 뒤에 꽂는 최소 DAST 하네스 (현재 nuclei, nikto).
 스캔을 실행하고 상태·결과를 조회하며, **loopback 또는 명시적으로 허가된 대상만**
 스캔하도록 안전장치를 강제한다.
