@@ -30,8 +30,27 @@ example.py           # 사용 예시
   severity 개념이 없어 모든 finding이 `Severity.UNKNOWN`이다. nuclei 전용
   `ScanConfig` 필드(severities/tags/template_ids)는 무시하고 맞는 것만 사용한다.
 
-여러 스캐너 결과는 각 `Finding`의 `scanner` 필드로 출처가 구분되며, `Finding` 리스트를
-합치면 하나의 리포트로 병합된다.
+여러 스캐너 결과는 각 `Finding`의 `scanner` 필드로 출처가 구분된다.
+
+### 다중 스캐너 (MultiScanRunner)
+
+한 타겟에 여러 스캐너를 병렬 실행하고 하나의 병합 뷰로 조회한다. `ScanRunner` 위에
+얹은 얇은 오케스트레이터로, 안전장치·리포팅을 그대로 재사용한다.
+
+```python
+from dast_harness import (MultiScanRunner, NucleiScanner, NiktoScanner,
+                          Target, build_report, ConsoleReporter)
+
+runner = MultiScanRunner([NucleiScanner(), NiktoScanner()])
+scan_id = runner.start_scan(Target("http://127.0.0.1:8080"))
+runner.wait(scan_id)
+print(ConsoleReporter().render(build_report(runner, scan_id)))
+```
+
+- `get_status`는 롤업 상태(any running→running, any failed→failed, else completed)와
+  스캐너별 breakdown을 함께 준다.
+- `get_results`/`get_warnings`는 전 스캐너 결과를 병합한다(경고는 `[scanner]` 접두).
+- `example_multi.py` 참고.
 
 ## 리포팅 (reporters/)
 

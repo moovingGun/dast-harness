@@ -10,10 +10,20 @@ class ConsoleReporter(Reporter):
 
     def render(self, report: ScanReport) -> str:
         s = report.status
-        lines = [
-            f"Target : {s.get('target')}",
-            f"Status : {s.get('status')}  (exit={s.get('exit_code')})",
-        ]
+        status_line = f"Status : {s.get('status')}"
+        if s.get("exit_code") is not None:
+            status_line += f"  (exit={s['exit_code']})"
+        lines = [f"Target : {s.get('target')}", status_line]
+
+        # Per-scanner breakdown, if this is a multi-scanner report.
+        scanners = s.get("scanners")
+        if scanners:
+            for name, st in scanners.items():
+                lines.append(
+                    f"  - {name}: {st.get('status')} "
+                    f"({st.get('findings_count', 0)} findings)"
+                )
+
         counts = report.severity_counts()
         summary = "  ".join(f"{sev}={n}" for sev, n in counts.items() if n)
         lines.append(

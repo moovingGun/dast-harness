@@ -2,6 +2,7 @@
 
 from .models import Finding, ScanConfig, ScanState, ScanStatus, Severity, Target
 from .reporters import ConsoleReporter, JSONReporter, Reporter, ScanReport, build_report
+from .orchestrator import MultiScanRunner
 from .runner import ScanRunner
 from .safety import TargetNotAuthorizedError, authorize_target
 from .scanners.base import ScannerExecutionError
@@ -16,6 +17,7 @@ __all__ = [
     "Severity",
     "Target",
     "ScanRunner",
+    "MultiScanRunner",
     "ScannerExecutionError",
     "NucleiScanner",
     "NiktoScanner",
