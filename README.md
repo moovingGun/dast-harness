@@ -43,6 +43,16 @@ open("results.json", "w").write(JSONReporter().render(report))  # JSON 저장
 사설망과 link-local 주소도 기본적으로 거부한다. 임의의 DNS 이름은 Nuclei 실행 시
 다시 해석될 수 있으므로 `localhost` 이외에는 명시적 allowlist가 필요하다.
 
+### 런타임 하드닝 (nuclei 실행 옵션)
+
+URL 인증만으로는 못 막는 nuclei 런타임 동작을 기본값으로 차단한다.
+
+- **`-disable-redirects` (항상)**: 로컬 대상이 공인 URL로 리다이렉트해 스캔을
+  비인가 호스트로 유도하는 것을 결정적으로 차단한다. 끌 수 없는 안전 불변값.
+- **`-no-interactsh` (기본)**: OAST 콜백을 위해 외부 interactsh 서버와 통신하는
+  것을 막아 스캔을 로컬로 격리한다. blind/OOB 탐지가 필요하면
+  `ScanConfig(enable_interactsh=True)`로 켤 수 있다(외부 통신 발생).
+
 ## 실행 (macOS 등 nuclei 설치 환경)
 
 ```bash

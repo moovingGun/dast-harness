@@ -35,7 +35,20 @@ class NucleiScanner(Scanner):
             return False
 
     def _build_command(self, target: Target, config: ScanConfig) -> list[str]:
-        cmd = [self.binary, "-u", target.url, "-jsonl", "-silent", "-no-color"]
+        # -disable-redirects is a safety invariant: a local target must not be
+        # able to redirect the scan onto an unauthorized (e.g. public) host.
+        cmd = [
+            self.binary,
+            "-u",
+            target.url,
+            "-jsonl",
+            "-silent",
+            "-no-color",
+            "-disable-redirects",
+        ]
+        if not config.enable_interactsh:
+            # Keep the scan locally isolated: no external OAST callbacks.
+            cmd.append("-no-interactsh")
         if config.severities:
             cmd += ["-severity", ",".join(s.value for s in config.severities)]
         if config.tags:

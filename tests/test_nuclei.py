@@ -43,6 +43,17 @@ class NucleiScannerTests(unittest.TestCase):
         self.assertIn("example-template", command)
         self.assertIn("20", command)
         self.assertIn("5", command)
+        # safety hardening defaults
+        self.assertIn("-disable-redirects", command)
+        self.assertIn("-no-interactsh", command)
+
+    def test_interactsh_can_be_enabled(self) -> None:
+        command = NucleiScanner()._build_command(
+            Target("http://127.0.0.1:8080"),
+            ScanConfig(enable_interactsh=True),
+        )
+        self.assertIn("-disable-redirects", command)  # still enforced
+        self.assertNotIn("-no-interactsh", command)
 
     def test_rejects_invalid_limits(self) -> None:
         with self.assertRaises(ValueError):

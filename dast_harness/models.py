@@ -50,6 +50,9 @@ class ScanConfig:
     template_ids: list[str] = field(default_factory=list)
     rate_limit: int | None = None          # requests/sec, nuclei -rate-limit
     request_timeout: int | None = None     # per-request seconds, nuclei -timeout
+    # OAST/interactsh coaxes the target into calling out to an external server.
+    # Off by default to keep scans locally isolated; enable for blind/OOB checks.
+    enable_interactsh: bool = False
 
     def __post_init__(self) -> None:
         if self.rate_limit is not None and self.rate_limit <= 0:
