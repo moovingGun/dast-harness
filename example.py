@@ -3,7 +3,7 @@
 Usage:
     python example.py http://127.0.0.1:8080
 
-Only local (loopback/private) targets pass by default. To scan a host you are
+Only loopback targets pass by default. To scan a host you are
 authorized to test, add it to `allowlist` below.
 """
 
@@ -23,7 +23,7 @@ def main() -> int:
         return 1
 
     # allowlist: hostnames you are explicitly authorized to scan (bypasses the
-    # local-only rule). Leave empty to allow local targets only.
+    # loopback-only rule). Leave empty to allow loopback targets only.
     runner = ScanRunner(scanner, allowlist=set())
 
     config = ScanConfig(severities=[Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL])

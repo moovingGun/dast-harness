@@ -3,6 +3,7 @@
 from .models import Finding, ScanConfig, ScanState, ScanStatus, Severity, Target
 from .runner import ScanRunner
 from .safety import TargetNotAuthorizedError, authorize_target
+from .scanners.base import ScannerExecutionError
 from .scanners.nuclei import NucleiScanner
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "Severity",
     "Target",
     "ScanRunner",
+    "ScannerExecutionError",
     "NucleiScanner",
     "authorize_target",
     "TargetNotAuthorizedError",

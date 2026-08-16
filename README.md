@@ -1,7 +1,7 @@
 # nuclei-harness
 
 단일 스캐너(nuclei) 기반 최소 DAST 하네스. nuclei를 실행하고 스캔 상태·결과를
-조회하며, **로컬(loopback/private) 또는 명시적으로 허가된 대상만** 스캔하도록
+조회하며, **loopback 또는 명시적으로 허가된 대상만** 스캔하도록
 안전장치를 강제한다.
 
 ## 구조
@@ -21,16 +21,17 @@ example.py           # 사용 예시
 `ScanRunner.start_scan()`은 스캐너 프로세스가 뜨기 전에 `authorize_target()`을
 반드시 통과시킨다. 대상은 다음 중 하나일 때만 허용된다.
 
-1. 호스트가 resolve되는 **모든** IP가 loopback / private / link-local
+1. 대상이 loopback IP 또는 `localhost`
 2. 호스트가 명시적 `allowlist`에 포함 (허가된 대상 예외)
 
-공인 도메인은 기본 거부. DNS로 우회하려 해도 resolve된 IP 중 하나라도 public이면
-거부된다.
+사설망과 link-local 주소도 기본적으로 거부한다. 임의의 DNS 이름은 Nuclei 실행 시
+다시 해석될 수 있으므로 `localhost` 이외에는 명시적 allowlist가 필요하다.
 
-## 실행 (칼리 등 nuclei 설치 환경)
+## 실행 (macOS 등 nuclei 설치 환경)
 
 ```bash
-which nuclei || sudo apt install -y nuclei   # 칼리엔 대개 이미 있음
+brew install nuclei
+nuclei -version
 python3 example.py http://127.0.0.1:8080
 ```
 
@@ -49,4 +50,14 @@ runner.get_status(scan_id)   # dict: status, findings_count, ...
 runner.get_results(scan_id)  # list[Finding] (스캔 중에도 스냅샷 조회 가능)
 runner.stop_scan(scan_id)    # 중단 요청
 runner.wait(scan_id)         # 완료 대기
+```
+
+임의 CLI 인자를 그대로 전달하는 기능은 제공하지 않는다. 특히 `-u`, `-list` 같은
+대상 변경 옵션이 허가 검사를 우회하지 않도록 모든 지원 옵션을 `ScanConfig` 필드로
+명시한다.
+
+## 테스트
+
+```bash
+python3 -m unittest discover -s tests -v
 ```

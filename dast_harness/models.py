@@ -50,7 +50,12 @@ class ScanConfig:
     template_ids: list[str] = field(default_factory=list)
     rate_limit: int | None = None          # requests/sec, nuclei -rate-limit
     request_timeout: int | None = None     # per-request seconds, nuclei -timeout
-    extra_args: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.rate_limit is not None and self.rate_limit <= 0:
+            raise ValueError("rate_limit must be greater than zero")
+        if self.request_timeout is not None and self.request_timeout <= 0:
+            raise ValueError("request_timeout must be greater than zero")
 
 
 @dataclass
@@ -85,6 +90,31 @@ class ScanState:
     def add_finding(self, finding: Finding) -> None:
         with self._lock:
             self._findings.append(finding)
+
+    def mark_running(self, started_at: float) -> None:
+        with self._lock:
+            self.status = ScanStatus.RUNNING
+            self.started_at = started_at
+
+    def mark_finished(
+        self,
+        status: ScanStatus,
+        finished_at: float,
+        *,
+        exit_code: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        if status in (ScanStatus.PENDING, ScanStatus.RUNNING):
+            raise ValueError(f"{status.value!r} is not a terminal scan status")
+        with self._lock:
+            self.status = status
+            self.finished_at = finished_at
+            self.exit_code = exit_code
+            self.error = error
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return self.status in (ScanStatus.PENDING, ScanStatus.RUNNING)
 
     def findings(self) -> list[Finding]:
         """Return a snapshot copy so callers can poll safely mid-scan."""

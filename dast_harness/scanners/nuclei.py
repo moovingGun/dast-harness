@@ -7,10 +7,12 @@ import json
 import shutil
 import subprocess
 import threading
+import time
+from collections import deque
 from typing import Any
 
 from ..models import Finding, ScanConfig, Severity, Target
-from .base import OnFinding, Scanner
+from .base import OnFinding, Scanner, ScannerExecutionError
 
 
 class NucleiScanner(Scanner):
@@ -44,7 +46,6 @@ class NucleiScanner(Scanner):
             cmd += ["-rate-limit", str(config.rate_limit)]
         if config.request_timeout is not None:
             cmd += ["-timeout", str(config.request_timeout)]
-        cmd += config.extra_args
         return cmd
 
     def _to_finding(self, data: dict[str, Any]) -> Finding:
@@ -76,40 +77,83 @@ class NucleiScanner(Scanner):
             bufsize=1,
         )
 
-        # Drain stderr in a side thread so a full pipe buffer can't deadlock us
-        # while we read stdout.
-        stderr_chunks: list[str] = []
+        # Drain both pipes in side threads. The controlling thread can then poll
+        # stop_event even while nuclei is producing no findings on stdout.
+        stderr_chunks: deque[str] = deque(maxlen=200)
+        reader_errors: list[Exception] = []
 
         def _drain_stderr() -> None:
             assert proc.stderr is not None
             for line in proc.stderr:
-                stderr_chunks.append(line)
+                stderr_chunks.append(line[:4096])
+
+        def _drain_stdout() -> None:
+            assert proc.stdout is not None
+            try:
+                for line in proc.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(
+                            f"nuclei emitted invalid JSONL: {line[:200]!r}"
+                        ) from exc
+                    if not isinstance(data, dict):
+                        raise RuntimeError(
+                            "nuclei emitted a JSONL value that is not an object"
+                        )
+                    on_finding(self._to_finding(data))
+            except Exception as exc:  # propagate reader/callback failures below
+                reader_errors.append(exc)
 
         err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        out_thread = threading.Thread(target=_drain_stdout, daemon=True)
         err_thread.start()
+        out_thread.start()
 
-        assert proc.stdout is not None
+        stopped = False
         try:
-            for line in proc.stdout:
+            while proc.poll() is None:
                 if stop_event is not None and stop_event.is_set():
-                    proc.terminate()
+                    stopped = True
                     break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue  # skip any non-JSON banner/noise
-                on_finding(self._to_finding(data))
-        finally:
-            proc.wait()
-            err_thread.join(timeout=5)
+                if reader_errors:
+                    break
+                time.sleep(0.05)
 
-        if proc.returncode not in (0, None) and stderr_chunks:
-            # Surface stderr via exception so the runner can record it.
-            raise RuntimeError(
-                f"nuclei exited with code {proc.returncode}: "
-                + "".join(stderr_chunks).strip()
+            if (stopped or reader_errors) and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            else:
+                proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            out_thread.join(timeout=5)
+            err_thread.join(timeout=5)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+        if out_thread.is_alive() or err_thread.is_alive():
+            raise RuntimeError("nuclei output reader did not stop cleanly")
+        if reader_errors:
+            raise reader_errors[0]
+        if proc.returncode is None:
+            raise RuntimeError("nuclei exited without a return code")
+        if proc.returncode != 0 and not stopped:
+            detail = "".join(stderr_chunks).strip()
+            suffix = f": {detail}" if detail else ""
+            raise ScannerExecutionError(
+                f"nuclei exited with code {proc.returncode}{suffix}",
+                proc.returncode,
             )
         return proc.returncode

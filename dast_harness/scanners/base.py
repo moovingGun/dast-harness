@@ -12,6 +12,14 @@ from ..models import Finding, ScanConfig, Target
 OnFinding = Callable[[Finding], None]
 
 
+class ScannerExecutionError(RuntimeError):
+    """A scanner process failed and supplied a concrete exit code."""
+
+    def __init__(self, message: str, exit_code: int) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
 class Scanner(ABC):
     name: str
 

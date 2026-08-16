@@ -12,7 +12,7 @@ import uuid
 
 from .models import ScanConfig, ScanState, ScanStatus, Target, Finding
 from .safety import authorize_target
-from .scanners.base import Scanner
+from .scanners.base import Scanner, ScannerExecutionError
 
 
 class ScanRunner:
@@ -55,22 +55,39 @@ class ScanRunner:
     def _run(
         self, state: ScanState, config: ScanConfig, stop_event: threading.Event
     ) -> None:
-        state.status = ScanStatus.RUNNING
-        state.started_at = time.time()
+        state.mark_running(time.time())
+        code: int | None = None
+        status = ScanStatus.FAILED
+        error: str | None = None
         try:
             code = self.scanner.run(
                 state.target, config, state.add_finding, stop_event
             )
-            state.exit_code = code
             if stop_event.is_set():
-                state.status = ScanStatus.STOPPED
+                status = ScanStatus.STOPPED
+                error = None
+            elif code == 0:
+                status = ScanStatus.COMPLETED
+                error = None
             else:
-                state.status = ScanStatus.COMPLETED
+                status = ScanStatus.FAILED
+                error = f"{self.scanner.name} exited with code {code}"
         except Exception as exc:  # noqa: BLE001 - record any scanner failure
-            state.error = str(exc)
-            state.status = ScanStatus.FAILED
+            if isinstance(exc, ScannerExecutionError):
+                code = exc.exit_code
+            if stop_event.is_set():
+                status = ScanStatus.STOPPED
+                error = None
+            else:
+                status = ScanStatus.FAILED
+                error = str(exc)
         finally:
-            state.finished_at = time.time()
+            state.mark_finished(
+                status,
+                time.time(),
+                exit_code=code,
+                error=error,
+            )
 
     def _get(self, scan_id: str) -> ScanState:
         with self._lock:
@@ -85,9 +102,10 @@ class ScanRunner:
         return self._get(scan_id).findings()
 
     def stop_scan(self, scan_id: str) -> None:
+        state = self._get(scan_id)
         with self._lock:
             event = self._stop_events.get(scan_id)
-        if event is not None:
+        if event is not None and state.is_active():
             event.set()
 
     def wait(self, scan_id: str, timeout: float | None = None) -> dict:
