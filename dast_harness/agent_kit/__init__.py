@@ -14,9 +14,11 @@
 """
 
 from .base import Agent
-from .contract import (CATEGORIES, MAX_EXCERPT, TARGET_KINDS, AgentFinding,
-                       AgentResult, Confidence, Coverage, Endpoint, Evidence,
-                       HttpExchange, Probe, finding_to_dict, validate_finding,
+from .contract import (CATEGORIES, MAX_EXCERPT, PARAM_LOCATIONS, PARAM_TYPES,
+                       TARGET_KINDS, AgentCompletion, AgentFinding,
+                       AgentResult, Confidence, Coverage, Evidence,
+                       HttpExchange, Probe, ReconResult, RequestParameter,
+                       RequestSeed, finding_to_dict, validate_finding,
                        validate_result)
 from .http import AgentHttpClient, RequestBudgetExceeded
 
@@ -26,16 +28,21 @@ __all__ = [
     "RequestBudgetExceeded",
     "AgentFinding",
     "AgentResult",
+    "AgentCompletion",
+    "ReconResult",
     "Confidence",
     "Coverage",
-    "Endpoint",
     "Evidence",
     "HttpExchange",
     "Probe",
+    "RequestParameter",
+    "RequestSeed",
     "validate_finding",
     "validate_result",
     "finding_to_dict",
     "CATEGORIES",
     "MAX_EXCERPT",
     "TARGET_KINDS",
+    "PARAM_LOCATIONS",
+    "PARAM_TYPES",
 ]

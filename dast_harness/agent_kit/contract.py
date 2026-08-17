@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from urllib.parse import urlparse
 
 from ..models import Finding, Severity
 
@@ -124,8 +125,9 @@ class Coverage:
     tested: int = 0
     skipped: int = 0
     skip_reasons: dict = field(default_factory=dict)   # {"no-auth-session": 3}
-    requests: int = 0
     findings: int = 0
+    # 요청 수는 여기 없다 — AgentCompletion.requests_made가 유일한 출처다.
+    # 같은 값을 두 곳에 두면 한쪽만 갱신됐을 때 리포트가 자기모순을 일으킨다.
 
 
 @dataclass
@@ -138,22 +140,92 @@ class AgentFinding(Finding):
     agent_data: dict = field(default_factory=dict)   # 자기 이름 키 아래에만
 
 
-@dataclass(frozen=True)
-class Endpoint:
-    """정찰의 주 산출물. 취약점이 아니라 **목록**이다 — Finding에 넣지 말 것.
+PARAM_LOCATIONS = ("query", "body", "path", "header", "cookie")
+PARAM_TYPES = ("string", "int", "float", "bool", "json")
 
-    `url_template`이 값이 아니라 모양인 게 핵심이다. IDOR 에이전트는
-    `/api/orders/1001`이 아니라 `/api/orders/{id}`를 받아야 "id를 바꿔본다"는
-    행동을 할 수 있다.
+
+@dataclass(frozen=True)
+class RequestParameter:
+    """검사 대상 파라미터 하나. **위치·값·타입·JSON 경로를 보존한다.**
+
+    이름만 넘기면 받는 쪽이 전부 다시 관측해야 한다. 네 조각이 다 필요하다:
+
+    - `location`: injection은 query와 body를 다르게 넣고, IDOR은 `path`를 노린다
+    - `value`: 관측된 값이 **주입의 기준선**이다. 정상 응답을 알아야 대조가 된다
+    - `type`: 숫자 파라미터에 문자열 페이로드를 넣으면 타입 오류가 SQL 오류로 오인된다
+    - `json_path`: JSON 본문은 이름만으론 위치를 못 짚는다 (`$.user.id`)
+    """
+
+    name: str
+    location: str                    # PARAM_LOCATIONS
+    value: str = ""                  # 관측된 값 = 주입의 기준선
+    type: str = "string"             # PARAM_TYPES
+    json_path: str = ""              # JSON 본문일 때만: "$.user.id"
+
+
+@dataclass(frozen=True)
+class RequestSeed:
+    """**실제로 보낼 수 있는 검사 요청** 하나. 정찰의 주 산출물이다.
+
+    이전 `Endpoint`는 "모양"이었다 — `/api/orders/{id}`. 씨앗은 실제 요청이라
+    받는 쪽이 그대로 재생하고 **한 부분만 바꾼다.** 뭘 바꿀 수 있는지는 `params`가
+    말한다: `location="path"`면 경로 세그먼트(IDOR), `"query"`/`"body"`면 값(injection).
+
+    취약점이 아니라 목록이므로 `Finding`에 넣지 말 것 — 발견한 요청 40개가
+    findings 40건이 되면 리포트가 망가진다.
     """
 
     method: str
-    url_template: str                # "/api/orders/{id}"
-    params: tuple[str, ...] = ()
+    url: str                         # 절대 URL. 그대로 보낼 수 있다
+    params: tuple[RequestParameter, ...] = ()
+    body_content_type: str = ""      # 요청 본문 인코딩 (POST 폼이면 urlencoded)
     auth_required: bool | None = None    # None = 미확인
     observed_status: int | None = None
-    content_type: str = ""
-    source: str = ""                 # "link" | "robots.txt" | "guess"
+    observed_content_type: str = ""  # 응답 Content-Type
+    source: str = ""                 # "seed"|"link"|"form"|"robots.txt"|"guess"
+
+    @property
+    def template(self) -> str:
+        """`/api/orders/{id}` — 경로 파라미터를 자리표시자로 되돌린 모양.
+
+        같은 엔드포인트의 씨앗을 하나로 묶는 키다. 이게 없으면 id마다 씨앗이
+        하나씩 생겨서 목록이 값으로 뒤덮인다.
+
+        **세그먼트 단위로 바꾼다.** 문자열 치환을 쓰면 값이 다른 세그먼트의
+        부분문자열일 때 망가진다 — `/api/v2/users/2`에서 `"2"`를 치환하면
+        `/api/v{id}/users/{id}`가 되어 버전 번호까지 자리표시자가 된다.
+        """
+        path = urlparse(self.url).path or "/"
+        pending = [p for p in self.params
+                   if p.location == "path" and str(p.value)]
+        out = []
+        for segment in path.split("/"):
+            # 아직 안 쓰인 경로 파라미터 중 이 세그먼트와 **정확히** 같은 것.
+            match = next((p for p in pending if str(p.value) == segment), None)
+            if match is None:
+                out.append(segment)
+            else:
+                pending.remove(match)
+                out.append("{%s}" % match.name)
+        return "/".join(out)
+
+
+@dataclass
+class AgentCompletion:
+    """실행이 **어떻게 끝났는가.** 스캐너의 `CompletionEvidence`에 대응하는 에이전트판.
+
+    `coverage`가 "무엇을 얼마나 봤나"라면 이쪽은 "끝까지 갔나"다. 둘을 섞으면
+    "0건 발견"이 완주한 결과인지 중간에 끊긴 결과인지 구별할 수 없다.
+
+    `blocked`에는 안전장치가 거부한 요청이 남는다 — 타겟 페이지에 심어진 프롬프트
+    인젝션의 흔적이 여기 쌓이므로 버리면 안 된다.
+
+    중단/실패 여부(`stopped`/`error`)는 아직 없다. 그걸 채울 러너가 없어서 항상
+    같은 값이 들어갈 뿐이었다. 배관을 붙일 때 같이 넣는다.
+    """
+
+    requests_made: int = 0
+    blocked: list[tuple[str, str]] = field(default_factory=list)   # (url, 거부 사유)
 
 
 @dataclass
@@ -164,25 +236,98 @@ class AgentResult:
     오케스트레이터가 셋을 똑같이 다룰 수 있다. 전에는 그냥 dict였고 키 이름을
     지켜주는 게 아무것도 없었다.
 
+    여기에는 **세 에이전트가 공통으로 내는 것만** 둔다. 정찰의 요청 씨앗처럼
+    한 에이전트에만 있는 산출물은 `ReconResult`처럼 하위 타입으로 내린다.
+
     보통 손으로 만들지 않고 `Agent.finish()`가 채워서 돌려준다.
     """
 
     agent: str                                   # "recon" (scanner는 f"agent:{agent}")
     findings: list[Finding] = field(default_factory=list)
     coverage: Coverage | None = None
-    endpoints: list[Endpoint] = field(default_factory=list)   # 정찰만 채운다
-    requests_made: int = 0
-    blocked: list[tuple[str, str]] = field(default_factory=list)  # 안전장치가 거부
+    completion: AgentCompletion | None = None
 
     def to_dict(self) -> dict:
         return {
             "agent": self.agent,
             "findings": [finding_to_dict(f) for f in self.findings],
             "coverage": asdict(self.coverage) if self.coverage is not None else None,
-            "endpoints": [asdict(e) for e in self.endpoints],
-            "requests_made": self.requests_made,
-            "blocked": [list(b) for b in self.blocked],
+            "completion": (
+                _completion_dict(self.completion) if self.completion is not None else None
+            ),
         }
+
+
+def _completion_dict(c: AgentCompletion) -> dict:
+    out = asdict(c)
+    out["blocked"] = [list(b) for b in c.blocked]   # 튜플은 JSON에서 배열이 된다
+    return out
+
+
+@dataclass
+class ReconResult(AgentResult):
+    """정찰 전용 반환값. 주 산출물은 취약점이 아니라 **검사 요청 씨앗 목록**이다.
+
+    이게 A→B,C 인터페이스다. injection/IDOR 에이전트는 `request_seeds`를 입력으로
+    받아 각자 한 부분씩 바꿔본다.
+    """
+
+    request_seeds: list[RequestSeed] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        out = super().to_dict()
+        out["request_seeds"] = [asdict(s) for s in self.request_seeds]
+        return out
+
+
+def _seed_errors(seeds) -> list[str]:
+    """요청 씨앗 검사. 씨앗은 B/C가 **그대로 재생**하는 물건이라 모양이 어긋나면
+    받는 쪽에서 조용히 잘못된 요청을 보낸다."""
+    errs: list[str] = []
+    for i, s in enumerate(seeds or ()):
+        where_seed = f"request_seeds[{i}]"
+
+        if not s.method:
+            errs.append(f"{where_seed}: method가 비어 있음")
+
+        parsed = urlparse(s.url)
+        # scheme만 보면 'javascript:alert(1)'이 통과한다. 씨앗은 그대로 전송되므로
+        # http(s) + 호스트가 있는지까지 봐야 한다.
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            errs.append(f"{where_seed}: 전송 가능한 http(s) URL이 아님 ({s.url!r})")
+
+        segments = set((parsed.path or "/").split("/"))
+        seen: set[tuple[str, str]] = set()
+        for p in s.params:
+            where = f"{where_seed} 파라미터 {p.name!r}"
+            if not p.name:
+                errs.append(f"{where_seed}: 이름 없는 파라미터")
+            if not isinstance(p.value, str):
+                # 문자열이 아니면 template이 TypeError로 터진다.
+                errs.append(f"{where}: value가 문자열이 아님 ({p.value!r})")
+            if p.location not in PARAM_LOCATIONS:
+                errs.append(
+                    f"{where}: location이 어휘 밖: {p.location!r} "
+                    f"(허용: {', '.join(PARAM_LOCATIONS)})"
+                )
+            if p.type not in PARAM_TYPES:
+                errs.append(
+                    f"{where}: type이 어휘 밖: {p.type!r} "
+                    f"(허용: {', '.join(PARAM_TYPES)})"
+                )
+            if p.json_path and p.location != "body":
+                errs.append(f"{where}: json_path는 location='body'에서만 쓴다")
+            # 경로 파라미터는 url의 세그먼트여야 한다. 어긋나면 url과 params가
+            # 서로 다른 요청을 가리키고, template도 틀어진다.
+            if (p.location == "path" and isinstance(p.value, str) and p.value
+                    and p.value not in segments):
+                errs.append(
+                    f"{where}: 경로 파라미터 값 {p.value!r}이 url 경로에 없음 ({s.url!r})"
+                )
+            if (p.name, p.location) in seen:
+                errs.append(f"{where}: 같은 (name, location)이 중복됨")
+            seen.add((p.name, p.location))
+    return errs
 
 
 def validate_result(r: AgentResult) -> list[str]:
@@ -210,6 +355,12 @@ def validate_result(r: AgentResult) -> list[str]:
                 f"coverage.findings({r.coverage.findings})가 실제 findings "
                 f"{len(r.findings)}건과 다름"
             )
+
+    if r.completion is None:
+        # coverage가 "얼마나 봤나"라면 completion은 "끝까지 갔나"다.
+        errs.append("completion이 없음 (완주인지 중단인지 구별할 수 없다)")
+
+    errs.extend(_seed_errors(getattr(r, "request_seeds", ())))
 
     expected_scanner = f"agent:{r.agent}"
     for f in r.findings:
@@ -247,6 +398,15 @@ def validate_finding(f: Finding) -> list[str]:
 
     conf = getattr(f, "confidence", Confidence.CONFIRMED)
     ev = getattr(f, "evidence", None)
+
+    # Confidence는 str Enum이라 "firm" == Confidence.FIRM이 True다. 그래서 문자열을
+    # 넣어도 비교는 통과하지만 직렬화가 `.value`에서 터진다. 여기서 잡는다.
+    if not isinstance(conf, Confidence):
+        errs.append(
+            f"confidence는 Confidence enum이어야 한다 (받은 값: {conf!r}). "
+            f"Confidence.FIRM처럼 쓸 것"
+        )
+        conf = Confidence.CONFIRMED
 
     # --- 규칙 2
     if conf is not Confidence.CONFIRMED and ev is None:
@@ -322,8 +482,10 @@ def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
 
 
 __all__ = [
-    "Confidence", "HttpExchange", "Evidence", "AgentFinding", "Endpoint",
-    "Probe", "Coverage", "AgentResult", "TARGET_KINDS",
+    "Confidence", "HttpExchange", "Evidence", "AgentFinding",
+    "RequestParameter", "RequestSeed", "Probe", "Coverage",
+    "AgentCompletion", "AgentResult", "ReconResult",
+    "TARGET_KINDS", "PARAM_LOCATIONS", "PARAM_TYPES",
     "validate_finding", "validate_result", "finding_to_dict",
     "CATEGORIES", "MAX_EXCERPT", "Severity",
 ]

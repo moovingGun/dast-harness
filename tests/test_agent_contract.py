@@ -13,11 +13,14 @@ from dataclasses import asdict
 
 from dast_harness import Finding, Severity
 from dast_harness.agent_kit import Agent
-from dast_harness.agent_kit.contract import (MASKED, MAX_EXCERPT, AgentFinding,
+from dast_harness.agent_kit.contract import (MASKED, MAX_EXCERPT,
+                                             AgentCompletion, AgentFinding,
                                              AgentResult, Confidence, Coverage,
-                                             Endpoint, Evidence, HttpExchange,
-                                             Probe, finding_to_dict,
+                                             Evidence, HttpExchange, Probe,
+                                             ReconResult, RequestParameter,
+                                             RequestSeed, finding_to_dict,
                                              validate_finding, validate_result)
+from dast_harness.agent_kit import recon
 from dast_harness.agent_kit.recon import ReconAgent
 
 
@@ -351,25 +354,11 @@ class SerializationTest(unittest.TestCase):
         self.assertEqual(out["confidence"], "confirmed")
         self.assertNotIn("agent_data", out)
 
-    def test_run_result_shape_is_json_serializable(self):
-        # The proposal §5 contract: what every agent's run() hands back.
-        result = {
-            "endpoints": [asdict(Endpoint(
-                method="GET", url_template="/api/orders/{id}", params=("id",),
-                auth_required=True, observed_status=200,
-                content_type="application/json", source="link"))],
-            "findings": [finding_to_dict(_agent_finding())],
-            "coverage": asdict(Coverage(
-                unit="object-id", tested=4, skipped=1,
-                skip_reasons={"no-auth-session": 1}, requests=9, findings=1)),
-            "requests_made": 9,
-            "blocked": [["http://attacker.example/exfil", "허가되지 않은 대상"]],
-        }
-        round_tripped = json.loads(json.dumps(result, ensure_ascii=False))
-        self.assertEqual(round_tripped["endpoints"][0]["url_template"],
-                         "/api/orders/{id}")
-        self.assertEqual(round_tripped["coverage"]["skip_reasons"],
-                         {"no-auth-session": 1})
+    def test_coverage_is_serializable(self):
+        out = json.loads(json.dumps(asdict(Coverage(
+            unit="object-id", tested=4, skipped=1,
+            skip_reasons={"no-auth-session": 1}, findings=1))))
+        self.assertEqual(out["skip_reasons"], {"no-auth-session": 1})
 
 
 class FakeClient:
@@ -410,6 +399,7 @@ class AgentResultTest(unittest.TestCase):
             agent="idor",
             findings=[_agent_finding()],
             coverage=Coverage(unit="object-id", tested=4, findings=1),
+            completion=AgentCompletion(requests_made=9),
         )
         return AgentResult(**{**base, **kw})
 
@@ -422,13 +412,15 @@ class AgentResultTest(unittest.TestCase):
 
     def test_missing_coverage_is_rejected(self):
         # 0 findings with no coverage cannot be told apart from "never looked".
-        errs = validate_result(AgentResult(agent="idor", coverage=None))
+        errs = validate_result(AgentResult(agent="idor", coverage=None,
+                                           completion=AgentCompletion()))
         self.assertTrue(any("coverage가 없음" in e for e in errs), errs)
 
     def test_empty_result_with_coverage_passes(self):
         # Finding nothing is a legitimate outcome and must not be an error.
         empty = AgentResult(agent="idor",
-                            coverage=Coverage(unit="object-id", tested=9, findings=0))
+                            coverage=Coverage(unit="object-id", tested=9, findings=0),
+                            completion=AgentCompletion(requests_made=9))
         self.assertEqual(validate_result(empty), [])
 
     def test_coverage_unit_outside_vocabulary_is_rejected(self):
@@ -452,17 +444,14 @@ class AgentResultTest(unittest.TestCase):
         self.assertTrue(any("evidence가 없음" in e for e in errs), errs)
 
     def test_result_is_json_serializable(self):
-        payload = json.dumps(self._result(
-            endpoints=[Endpoint(method="GET", url_template="/api/orders/{id}",
-                                params=("id",))],
+        payload = json.dumps(self._result(completion=AgentCompletion(
             requests_made=9,
             blocked=[("http://attacker.example/exfil", "허가되지 않은 대상")],
-        ).to_dict(), ensure_ascii=False)
+        )).to_dict(), ensure_ascii=False)
         out = json.loads(payload)
         self.assertEqual(out["agent"], "idor")
-        self.assertEqual(out["endpoints"][0]["url_template"], "/api/orders/{id}")
         self.assertEqual(out["coverage"]["unit"], "object-id")
-        self.assertEqual(out["blocked"][0][1], "허가되지 않은 대상")
+        self.assertEqual(out["completion"]["blocked"][0][1], "허가되지 않은 대상")
 
 
 class AgentBaseTest(unittest.TestCase):
@@ -485,8 +474,7 @@ class AgentBaseTest(unittest.TestCase):
         self.assertEqual(result.agent, "idor")
         self.assertEqual(result.coverage.unit, "object-id")
         self.assertEqual(result.coverage.tested, 3)
-        self.assertEqual(result.coverage.requests, 11)
-        self.assertEqual(result.requests_made, 11)
+        self.assertEqual(result.completion.requests_made, 11)
 
     def test_finish_counts_findings_itself(self):
         # Hand-counted coverage drifts; derived coverage cannot.
@@ -498,7 +486,7 @@ class AgentBaseTest(unittest.TestCase):
         # Prompt-injection attempts show up here, so they must not be dropped.
         agent = self._stub()
         agent.client.blocked = [("http://attacker.example/exfil", "허가되지 않은 대상")]
-        self.assertEqual(agent.run("http://t.invalid").blocked,
+        self.assertEqual(agent.run("http://t.invalid").completion.blocked,
                          [("http://attacker.example/exfil", "허가되지 않은 대상")])
 
     def test_finish_raises_on_a_contract_violation(self):
@@ -514,6 +502,235 @@ class AgentBaseTest(unittest.TestCase):
         self.assertEqual(result.coverage.skip_reasons, {"no-auth-session": 3})
 
 
+class RequestSeedTest(unittest.TestCase):
+    """Seeds are replayed verbatim by the other two agents.
+
+    A seed that loses the parameter's location, value or type forces the
+    receiving agent to re-observe everything recon already saw.
+    """
+
+    def _seed(self, **kw):
+        base = dict(
+            method="GET",
+            url="http://127.0.0.1:8080/api/orders/1001",
+            params=(RequestParameter(name="id", location="path",
+                                     value="1001", type="int"),),
+        )
+        return RequestSeed(**{**base, **kw})
+
+    def test_template_collapses_path_values(self):
+        # Without this, every id becomes its own seed and the list drowns in values.
+        self.assertEqual(self._seed().template, "/api/orders/{id}")
+
+    def test_template_of_a_plain_path_is_the_path(self):
+        seed = RequestSeed(method="GET", url="http://127.0.0.1:8080/login")
+        self.assertEqual(seed.template, "/login")
+
+    def test_seed_keeps_the_observed_value(self):
+        # injection needs the baseline value; IDOR needs the id it can pivot from.
+        self.assertEqual(self._seed().params[0].value, "1001")
+
+    def test_valid_seed_passes_validation(self):
+        result = ReconResult(agent="recon",
+                             coverage=Coverage(unit="endpoint", tested=1, findings=0),
+                             completion=AgentCompletion(),
+                             request_seeds=[self._seed()])
+        self.assertEqual(validate_result(result), [])
+
+    def _seed_errors(self, seed):
+        return validate_result(ReconResult(
+            agent="recon", coverage=Coverage(unit="endpoint", tested=1, findings=0),
+            completion=AgentCompletion(), request_seeds=[seed]))
+
+    def test_relative_url_is_rejected(self):
+        # A seed is meant to be sendable as-is; a bare path is not.
+        errs = self._seed_errors(self._seed(url="/api/orders/1001"))
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
+
+    def test_location_outside_vocabulary_is_rejected(self):
+        errs = self._seed_errors(self._seed(
+            params=(RequestParameter(name="id", location="urlpath"),)))
+        self.assertTrue(any("location" in e for e in errs), errs)
+
+    def test_type_outside_vocabulary_is_rejected(self):
+        errs = self._seed_errors(self._seed(
+            params=(RequestParameter(name="id", location="path", type="number"),)))
+        self.assertTrue(any("type" in e for e in errs), errs)
+
+    def test_json_path_outside_body_is_rejected(self):
+        errs = self._seed_errors(self._seed(
+            params=(RequestParameter(name="id", location="query",
+                                     json_path="$.user.id"),)))
+        self.assertTrue(any("json_path" in e for e in errs), errs)
+
+    def test_json_body_parameter_is_accepted(self):
+        errs = self._seed_errors(self._seed(
+            method="POST", body_content_type="application/json",
+            params=(RequestParameter(name="id", location="body", value="1001",
+                                     type="int", json_path="$.order.id"),)))
+        self.assertEqual(errs, [])
+
+    def test_unnamed_parameter_is_rejected(self):
+        errs = self._seed_errors(self._seed(
+            params=(RequestParameter(name="", location="query"),)))
+        self.assertTrue(any("이름 없는" in e for e in errs), errs)
+
+
+class SeedRegressionTest(unittest.TestCase):
+    """Defects found reviewing the RequestSeed change. Each one shipped a wrong
+    request to whoever replays the seed, so each gets a repro."""
+
+    def _template(self, path, path_params):
+        return RequestSeed(
+            method="GET", url="http://127.0.0.1:8080" + path,
+            params=tuple(RequestParameter(name=n, location="path", value=v,
+                                          type="int")
+                         for n, v in path_params),
+        ).template
+
+    def test_value_inside_another_segment_is_not_substituted(self):
+        # str.replace turned this into "/api/v{id}/users/{id}": the API version
+        # became a placeholder, so two ids produced two different templates and
+        # the seed list drowned in values — the exact thing template prevents.
+        self.assertEqual(self._template("/api/v2/users/2", [("id", "2")]),
+                         "/api/v2/users/{id}")
+
+    def test_shorter_id_is_not_substituted_inside_a_longer_one(self):
+        self.assertEqual(self._template("/api/1/items/11",
+                                        [("id1", "1"), ("id2", "11")]),
+                         "/api/{id1}/items/{id2}")
+
+    def test_repeated_value_consumes_one_placeholder_each(self):
+        self.assertEqual(self._template("/files/1/1", [("id1", "1"), ("id2", "1")]),
+                         "/files/{id1}/{id2}")
+        self.assertEqual(self._template("/orders/2/items/2",
+                                        [("id1", "2"), ("id2", "2")]),
+                         "/orders/{id1}/items/{id2}")
+
+    def test_merged_seed_keeps_url_and_path_params_together(self):
+        # Merging took the newer path value but kept the older url, inventing a
+        # request that was never sent (url .../1001 carrying id=7).
+        agent = ReconAgent(FakeClient({}))
+        for value in ("1001", "7"):
+            agent._add(RequestSeed(
+                method="GET", url=f"http://127.0.0.1:8080/api/orders/{value}",
+                params=(RequestParameter(name="id", location="path",
+                                         value=value, type="int"),),
+                observed_status=200))
+        seed = next(iter(agent.seeds.values()))
+        path_value = next(p.value for p in seed.params if p.location == "path")
+        self.assertIn(path_value, seed.url)
+        # ...and the seed still matches the key it is stored under.
+        self.assertEqual(("GET", seed.template), next(iter(agent.seeds)))
+
+    def test_quoted_attribute_value_keeps_its_spaces(self):
+        # ATTR stopped at the first space, so the injection baseline was wrong.
+        self.assertEqual(
+            recon._attrs('name="title" value="hello world"'),
+            {"name": "title", "value": "hello world"})
+
+    def test_key_value_text_inside_an_attribute_is_not_an_attribute(self):
+        # 'placeholder="e.g. name=foo"' renamed the parameter to foo, and
+        # 'placeholder="hint: type=submit"' made a password field look like a
+        # submit button, silently dropping it from the seed.
+        self.assertEqual(
+            recon._attrs('name="q" placeholder="e.g. name=foo"'),
+            {"name": "q", "placeholder": "e.g. name=foo"})
+        self.assertEqual(
+            recon._attrs('name="password" type="password" '
+                         'placeholder="hint: type=submit"')["type"],
+            "password")
+
+    def test_entities_in_attribute_values_are_decoded(self):
+        self.assertEqual(recon._attrs('action="/s?a=1&amp;b=2"')["action"],
+                         "/s?a=1&b=2")
+
+    def test_form_tag_survives_a_gt_inside_an_attribute(self):
+        # The attr chunk was cut at the '>' in onsubmit, so method/action were
+        # never read: the POST endpoint vanished and the current page got a
+        # phantom query parameter instead.
+        agent = ReconAgent(FakeClient({}))
+        agent._record_forms(
+            "http://t.invalid/checkout",
+            '<form onsubmit="return a>b" method="post" action="/pay">'
+            '<input name="amount" value="10"></form>')
+        self.assertEqual(list(agent.seeds), [("POST", "/pay")])
+        seed = agent.seeds[("POST", "/pay")]
+        self.assertEqual([(p.name, p.location) for p in seed.params],
+                         [("amount", "body")])
+
+
+class SeedValidationTest(unittest.TestCase):
+    """`validate_result` let several unsendable seeds through."""
+
+    def _errors(self, **kw):
+        seed = RequestSeed(**{**dict(method="GET",
+                                     url="http://127.0.0.1:8080/x"), **kw})
+        return validate_result(ReconResult(
+            agent="recon",
+            coverage=Coverage(unit="endpoint", tested=1, findings=0),
+            completion=AgentCompletion(), request_seeds=[seed]))
+
+    def test_non_http_scheme_is_rejected(self):
+        # Only `.scheme` was checked, so javascript: URLs passed.
+        errs = self._errors(url="javascript:alert(1)")
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
+
+    def test_url_without_a_host_is_rejected(self):
+        errs = self._errors(url="http:///no-host")
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
+
+    def test_empty_method_is_rejected(self):
+        errs = self._errors(method="")
+        self.assertTrue(any("method" in e for e in errs), errs)
+
+    def test_path_param_absent_from_the_url_is_rejected(self):
+        errs = self._errors(
+            url="http://127.0.0.1:8080/api/orders/1001",
+            params=(RequestParameter(name="id", location="path", value="7"),))
+        self.assertTrue(any("url 경로에 없음" in e for e in errs), errs)
+
+    def test_non_string_value_is_rejected(self):
+        # An int value made `.template` raise TypeError downstream.
+        errs = self._errors(
+            params=(RequestParameter(name="id", location="query", value=7),))
+        self.assertTrue(any("문자열이 아님" in e for e in errs), errs)
+
+    def test_duplicate_parameter_is_rejected(self):
+        errs = self._errors(params=(
+            RequestParameter(name="q", location="query", value="a"),
+            RequestParameter(name="q", location="query", value="b")))
+        self.assertTrue(any("중복" in e for e in errs), errs)
+
+    def test_none_request_seeds_does_not_crash(self):
+        result = ReconResult(
+            agent="recon", coverage=Coverage(unit="endpoint", tested=0, findings=0),
+            completion=AgentCompletion(), request_seeds=None)
+        self.assertEqual(validate_result(result), [])   # raised TypeError before
+
+
+class ConfidenceTypeTest(unittest.TestCase):
+    """`Confidence` is a str Enum, so a bare string compares equal to it."""
+
+    def test_bare_string_confidence_is_rejected(self):
+        # It passed validation and then crashed to_dict() on `.value`.
+        f = _agent_finding(confidence="firm")
+        errs = validate_finding(f)
+        self.assertTrue(any("Confidence enum" in e for e in errs), errs)
+
+    def test_enum_confidence_is_accepted(self):
+        self.assertEqual(validate_finding(_agent_finding(
+            confidence=Confidence.FIRM)), [])
+
+    def test_rejected_confidence_never_reaches_serialization(self):
+        # The contract check has to fire before to_dict() is ever called.
+        result = AgentResult(
+            agent="idor", findings=[_agent_finding(confidence="firm")],
+            coverage=Coverage(unit="object-id", tested=1, findings=1),
+            completion=AgentCompletion())
+        self.assertTrue(validate_result(result))
+
+
 class ReconSkeletonTest(unittest.TestCase):
     """recon.py is the file the other two agents get copied from.
 
@@ -525,8 +742,21 @@ class ReconSkeletonTest(unittest.TestCase):
         "http://t.invalid/robots.txt": (
             200, "text/plain", "User-agent: *\nDisallow: /admin/\n"),
         "http://t.invalid/": (
-            200, "text/html", '<a href="/admin/">admin</a>'),
-        "http://t.invalid/admin/": (200, "text/html", "<h1>Administrator Login</h1>"),
+            200, "text/html",
+            '<a href="/admin/">admin</a>'
+            '<a href="/search?q=invoice">search</a>'
+            '<a href="/api/orders/1001">order</a>'),
+        "http://t.invalid/admin/": (
+            200, "text/html",
+            '<h1>Administrator Login</h1>'
+            '<form method="post" action="/login">'
+            '  <input type="text" name="username" value="admin">'
+            '  <input type="password" name="password">'
+            '  <input type="number" name="pin">'
+            '  <input type="submit" value="Sign in">'
+            '</form>'),
+        "http://t.invalid/search": (200, "text/html", "<h1>0 results</h1>"),
+        "http://t.invalid/api/orders/1001": (401, "application/json", "{}"),
     }
 
     def _run(self):
@@ -540,15 +770,59 @@ class ReconSkeletonTest(unittest.TestCase):
         self.assertIsInstance(result, AgentResult)
         self.assertEqual(validate_result(result), [])
 
-    def test_recon_reports_endpoints_and_a_finding(self):
+    def test_recon_reports_seeds_and_a_finding(self):
         result = self._run()
-        templates = {e.url_template for e in result.endpoints}
+        templates = {s.template for s in result.request_seeds}
         self.assertIn("/admin/", templates)
         self.assertEqual([f.finding_id for f in result.findings],
                          ["robots-discloses-reachable-paths"])
 
     def test_recon_result_serializes(self):
-        json.dumps(self._run().to_dict(), ensure_ascii=False)
+        out = json.loads(json.dumps(self._run().to_dict(), ensure_ascii=False))
+        self.assertIn("request_seeds", out)
+        self.assertIn("completion", out)
+
+    def _seed(self, method, template):
+        return next(s for s in self._run().request_seeds
+                    if (s.method, s.template) == (method, template))
+
+    def test_form_body_parameters_are_captured(self):
+        # The crawler used to read only the `action` attribute and throw the
+        # inputs away, so the injection agent had to re-scrape every form.
+        seed = self._seed("POST", "/login")
+        self.assertEqual({(p.name, p.location) for p in seed.params},
+                         {("username", "body"), ("password", "body"),
+                          ("pin", "body")})
+
+    def test_form_field_types_and_values_survive(self):
+        params = {p.name: p for p in self._seed("POST", "/login").params}
+        self.assertEqual(params["username"].value, "admin")
+        self.assertEqual(params["pin"].type, "int")        # <input type="number">
+        self.assertEqual(params["password"].type, "string")
+
+    def test_submit_button_is_not_a_parameter(self):
+        # A submit control carries no data worth injecting into.
+        names = {p.name for p in self._seed("POST", "/login").params}
+        self.assertNotIn("Sign in", names)
+
+    def test_post_form_records_its_body_encoding(self):
+        self.assertEqual(self._seed("POST", "/login").body_content_type,
+                         "application/x-www-form-urlencoded")
+
+    def test_post_seed_is_not_actually_sent(self):
+        # Recon must not press state-changing buttons; it reports the shape only.
+        self.assertIsNone(self._seed("POST", "/login").observed_status)
+
+    def test_query_parameter_keeps_its_value(self):
+        params = self._seed("GET", "/search").params
+        self.assertEqual([(p.name, p.location, p.value) for p in params],
+                         [("q", "query", "invoice")])
+
+    def test_path_parameter_is_typed_and_valued(self):
+        seed = self._seed("GET", "/api/orders/{id}")
+        self.assertEqual([(p.name, p.location, p.value, p.type) for p in seed.params],
+                         [("id", "path", "1001", "int")])
+        self.assertIs(seed.auth_required, True)            # 401 observed
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 
 from ..models import Finding
-from .contract import AgentResult, Coverage, Endpoint, validate_result
+from .contract import (AgentCompletion, AgentResult, Coverage, validate_result)
 from .http import AgentHttpClient
 
 
@@ -26,10 +26,13 @@ class Agent(ABC):
 
     name: str = ""              # "recon" / "injection" / "idor". scanner는 f"agent:{name}"
     unit: str = "endpoint"      # Coverage.unit — 이 에이전트가 세는 단위
+    result_cls: type[AgentResult] = AgentResult   # 고유 산출물이 있으면 하위 타입으로
 
     def __init__(self, client: AgentHttpClient) -> None:
         # 에이전트는 이 클라이언트만 쓴다. 직접 requests를 쓰면 안전 경계를 우회한다.
         self.client = client
+        # 찾는 대로 여기에 append 한다. 중단되더라도 여기까지는 살아남는다.
+        self.findings: list[Finding] = []
 
     @abstractmethod
     def run(self, base: str) -> AgentResult:
@@ -43,18 +46,21 @@ class Agent(ABC):
         findings: Iterable[Finding],
         *,
         tested: int,
-        endpoints: Iterable[Endpoint] = (),
         skipped: int = 0,
         skip_reasons: Mapping[str, int] | None = None,
+        **extra,
     ) -> AgentResult:
-        """`AgentResult`를 만들고 계약을 검사한다. 위반이면 `AssertionError`.
+        """결과를 만들고 계약을 검사한다. 위반이면 `AssertionError`.
 
         `coverage.findings`와 요청 수, `blocked`를 여기서 채우므로 손으로 세다가
         틀릴 일이 없다. 계약 위반을 조용히 넘기지 않는 게 요점이다 — 이 검사를
         지우면 세 에이전트가 다시 어긋난다.
+
+        `**extra`는 `result_cls`의 고유 필드로 넘어간다
+        (정찰이면 `request_seeds=[...]`).
         """
         findings = list(findings)
-        result = AgentResult(
+        result = self.result_cls(
             agent=self.name,
             findings=findings,
             coverage=Coverage(
@@ -62,12 +68,13 @@ class Agent(ABC):
                 tested=tested,
                 skipped=skipped,
                 skip_reasons=dict(skip_reasons or {}),
-                requests=self.client.request_count,
                 findings=len(findings),
             ),
-            endpoints=list(endpoints),
-            requests_made=self.client.request_count,
-            blocked=list(self.client.blocked),
+            completion=AgentCompletion(
+                requests_made=self.client.request_count,
+                blocked=list(self.client.blocked),
+            ),
+            **extra,
         )
         problems = validate_result(result)
         if problems:

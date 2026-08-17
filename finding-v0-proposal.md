@@ -266,24 +266,43 @@ object-id    parameter    endpoint    header    path
 
 **제일 중요한 인터페이스가 이거다** — A의 출력이 B/C의 입력이다.
 처음에는 그냥 dict였는데, 키 이름을 지켜주는 게 아무것도 없었다. `Finding` 하나의
-모양만 맞춰도 셋을 합칠 수 없다 — 한 명이 endpoints를 dict로, 다른 명이 튜플
-리스트로 내면 오케스트레이터가 똑같이 다룰 수 없다. 그래서 dataclass로 못박았다.
+모양만 맞춰도 셋을 합칠 수 없다 — 한 명이 목록을 dict로, 다른 명이 튜플 리스트로
+내면 오케스트레이터가 똑같이 다룰 수 없다. 그래서 dataclass로 못박았다.
 
 ```python
 @dataclass
 class AgentResult:
     agent: str                       # "recon" (scanner는 f"agent:{agent}")
     findings: list[Finding] = []
-    coverage: Coverage | None = None
-    endpoints: list[Endpoint] = []   # 정찰만 채운다. B/C는 빈 리스트
-    requests_made: int = 0
+    coverage: Coverage | None = None       # 무엇을 얼마나 봤나
+    completion: AgentCompletion | None = None   # 끝까지 갔나
+```
+
+**공통으로 내는 것만 여기 둔다.** 한 에이전트에만 있는 산출물은 하위 타입으로
+내린다 — 정찰의 요청 씨앗이 그렇다 (§5-1).
+
+```python
+@dataclass
+class ReconResult(AgentResult):
+    request_seeds: list[RequestSeed] = []   # ← A→B,C 인터페이스
+
+@dataclass
+class AgentCompletion:
+    requests_made: int = 0                # 요청 수의 **유일한** 출처
     blocked: list[tuple[str, str]] = []   # 안전장치가 거부한 요청
 ```
 
+중단/실패 여부(`stopped`/`error`)는 아직 없다 — 그걸 채울 러너가 없어서 항상 같은
+값이 들어갈 뿐이었다. 배관을 붙일 때 같이 넣는다.
+
+`coverage`와 `completion`을 나눈 이유: 전자는 "무엇을 얼마나 봤나", 후자는
+"끝까지 갔나"다. 섞으면 **0건 발견이 완주 결과인지 중간에 끊긴 결과인지 구별할 수
+없다.** 스캐너 쪽 `CompletionEvidence`와 같은 발상이다.
+
 `validate_result(r)`이 검사한다: `agent` 이름, `coverage` 존재와 `unit` 어휘,
-`coverage.findings`가 실제 개수와 맞는지, **findings의 `scanner`가 자기 에이전트
-이름인지**(남의 에이전트를 베끼고 `name`만 안 바꾼 경우가 여기서 걸린다), 그리고
-findings 각각의 §4 규칙까지.
+`coverage.findings`가 실제 개수와 맞는지, `completion` 존재, 요청 씨앗의 URL·
+파라미터 어휘, **findings의 `scanner`가 자기 에이전트 이름인지**(남의 에이전트를
+베끼고 `name`만 안 바꾼 경우가 여기서 걸린다), 그리고 findings 각각의 §4 규칙까지.
 
 ### 5-0. `Agent`를 상속한다
 
@@ -317,31 +336,53 @@ return self.finish(findings, tested=12, skipped=3,
 `Finding`에 밀어 넣으면 안 된다 — "발견한 URL 40개"가 findings 40건이 되면
 리포트가 망가진다.
 
-- **엔드포인트 인벤토리** (`endpoints`) → injection·IDOR 에이전트의 **입력**
+- **요청 씨앗** (`request_seeds`) → injection·IDOR 에이전트의 **입력**
 - 진짜 취약점만 `findings`로 (예: 사용자 열거 — §6 예시 3)
 
 ```python
 @dataclass(frozen=True)
-class Endpoint:
+class RequestSeed:
     method: str
-    url_template: str                    # "/api/orders/{id}" — 값이 아니라 모양
-    params: tuple[str, ...] = ()         # ("id",) — frozen이라 tuple이다
-    auth_required: bool | None = None    # None = 미확인
-    observed_status: int | None = None
-    content_type: str = ""
-    source: str = ""                     # "link" | "robots.txt" | "guess" | "seed"
+    url: str                             # 절대 URL. 그대로 보낼 수 있다
+    params: tuple[RequestParameter, ...] = ()
+    body_content_type: str = ""          # POST 폼이면 urlencoded
+    auth_required: bool | None = None     # None = 미확인
+    observed_status: int | None = None    # None = 아직 안 보냈다
+    observed_content_type: str = ""
+    source: str = ""                     # "seed"|"link"|"form"|"robots.txt"|"guess"
+
+    @property
+    def template(self) -> str: ...       # "/api/orders/{id}" — 씨앗을 묶는 키
+
+@dataclass(frozen=True)
+class RequestParameter:
+    name: str
+    location: str          # "query"|"body"|"path"|"header"|"cookie"
+    value: str = ""        # 관측된 값 = 주입의 기준선
+    type: str = "string"   # "string"|"int"|"float"|"bool"|"json"
+    json_path: str = ""    # JSON 본문일 때만: "$.user.id"
 ```
 
-**`url_template`이 값이 아니라 모양인 게 핵심이다.** IDOR 에이전트는
-`/api/orders/1001`이 아니라 `/api/orders/{id}`를 받아야 "id를 바꿔본다"는
-행동을 할 수 있다. `recon.py`의 `_templatize()`가 숫자 세그먼트를 `{id}`로 바꾼다.
+**"모양"이 아니라 "실제로 보낼 수 있는 요청"이다.** 이전 `Endpoint`는
+`/api/orders/{id}`라는 모양만 줬는데, 받는 쪽은 그걸로 요청을 만들 수 없었다.
+씨앗은 그대로 재생하고 **한 부분만 바꾼다.** 뭘 바꿀 수 있는지는 `params`가 말한다 —
+`location="path"`면 IDOR이 노리고, `"query"`/`"body"`면 injection이 노린다.
 
-현재 구현의 한계 두 개 — **B/C가 여기에 걸린다. §9-4에서 결정하자.**
+파라미터의 네 조각이 다 필요한 이유:
 
-- `url_template`은 **path만** 담는다 (`/api/orders/{id}`). 절대 URL이 아니다.
-  반면 `Finding.matched_at`은 절대 URL이다. B/C가 base를 어디서 받을지 안 정했다.
-- `params`는 **쿼리 파라미터만** 담는다 (`parse_qsl` 결과). POST body 파라미터가
-  없다 — injection 팀은 이게 필요하다.
+| 조각 | 없으면 |
+|---|---|
+| `location` | injection이 query와 body를 구별 못 한다 |
+| `value` | 정상 응답(기준선)을 모르니 대조를 만들 수 없다 |
+| `type` | 숫자 칸에 문자열을 넣고 타입 오류를 SQL 오류로 오인한다 |
+| `json_path` | JSON 본문에서 이름만으론 위치를 못 짚는다 |
+
+`template`은 씨앗을 묶는 키다. 이게 없으면 id마다 씨앗이 하나씩 생겨서 목록이
+값으로 뒤덮인다.
+
+**정찰은 폼을 보내지 않는다.** `<form>`에서 파라미터는 읽지만 POST는 눌러보지
+않으므로 `observed_status`가 `None`이다 — "모양은 찾았고 아직 안 보냈다"는 뜻이다.
+상태를 바꾸는 요청을 실제로 보내는 건 그 요청을 담당하는 에이전트의 몫이다.
 
 ### 5-2. `Coverage` — finding이 0건이어도 남는다
 
@@ -352,7 +393,6 @@ class Coverage:
     tested: int = 0
     skipped: int = 0
     skip_reasons: dict = ...     # {"no-auth-session": 3}
-    requests: int = 0
     findings: int = 0
 ```
 
@@ -360,8 +400,17 @@ class Coverage:
 숫자가 무슨 뜻인지 알 수 없다 — 0건이 "깨끗하다"인지 "세션이 없어서 못 돌았다"인지
 구별이 안 된다. `Finding`이 아니라 `run()` 반환값에 담는다.
 
-> **B, C에게:** 정찰이 끝날 때까지 기다리지 마. `Endpoint`를 이 모양으로
+> **B, C에게:** 정찰이 끝날 때까지 기다리지 마. `RequestSeed`를 이 모양으로
 > **가짜로 직접 만들어서** 각자 진행하고, 나중에 A의 실제 출력으로 갈아끼우면 된다.
+>
+> 지금 정찰이 실제로 내는 씨앗 (통제 타겟 기준):
+>
+> ```
+> POST /login              -    ?    [form]  username=?:body/string, password=?:body/string
+> GET  /api/orders/{id}    401  auth [link]  id=1001:path/int
+> GET  /search             200  open [link]  q=invoice:query/string
+> GET  /lookup             200  open [link]  q=alice:query/string
+> ```
 
 ---
 
@@ -526,7 +575,7 @@ AgentFinding(
 
 ### 예시 3 — 정찰 (`agent:recon`)
 
-정찰이 내는 **진짜 취약점** 쪽 예시다. (엔드포인트 목록은 §5의 `Endpoint`로 따로 나감)
+정찰이 내는 **진짜 취약점** 쪽 예시다. (요청 씨앗 목록은 §5-1의 `RequestSeed`로 따로 나감)
 
 ```python
 AgentFinding(
@@ -676,11 +725,13 @@ AgentFinding(
 3. `baseline_index`를 규칙으로 **필수**화할까? 지금은 린터가 범위만 검사한다.
    대조가 없는 finding(예: `/.env` 노출)도 있어서 무조건 필수는 무리인데,
    "category가 idor/injection이면 필수" 정도는 코드로 강제할 수 있다.
-4. **§5 `Endpoint`가 B/C에게 충분한가? 이게 A→B,C 인터페이스라 제일 중요하다.**
-   결정해야 할 게 두 개다.
-   - `url_template`을 path만 둘지, 절대 URL로 할지 (지금은 path만)
-   - POST body 파라미터를 어떻게 넘길지 — `params`에 섞을지, 필드를 나눌지.
-     injection 팀 의견이 결정적이다.
+4. **§5 `RequestSeed`가 B/C에게 충분한가? 이게 A→B,C 인터페이스라 제일 중요하다.**
+   초안의 `Endpoint`는 모양(`/api/orders/{id}`)만 줘서 받는 쪽이 요청을 만들 수
+   없었고, POST body 파라미터가 아예 없었다. 지금은 절대 URL + 위치·값·타입·
+   JSON 경로를 보존한다. 남은 질문:
+   - `location`/`type` 어휘에 빠진 값이 있나? (지금:
+     query/body/path/header/cookie, string/int/float/bool/json)
+   - 헤더·쿠키 파라미터는 아직 정찰이 채우지 않는다. 필요한 팀이 있나?
 5. `finding_id` 접두사 규칙 — 세 에이전트가 같은 취약점을 다르게 이름 붙이면
    `validate.py`의 `match_any`가 이중 카운트해서 탐지율이 부풀려진다.
    `<agent>-<무엇>-<어디>`로 할까? (중복 제거 로직 자체는 §7로 미뤄도 된다)
