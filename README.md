@@ -8,10 +8,19 @@
 스캔을 실행하고 상태·결과를 조회하며, **loopback 또는 명시적으로 허가된 대상만**
 스캔하도록 안전장치를 강제한다.
 
+## 설치
+
+```bash
+pip install .            # 런타임 의존성 없음 (stdlib only), Python 3.11+
+dast-harness --help      # 콘솔 스크립트
+```
+
+설치 없이 저장소에서 바로 쓰려면 `python -m dast_harness ...` 로 동일하게 동작한다.
+
 ## CLI
 
 ```bash
-python -m dast_harness scan http://127.0.0.1:8080 \
+dast-harness scan http://127.0.0.1:8080 \
     --scanner nuclei,nikto \      # 기본: 설치된 것 전부
     --allow staging.internal \    # allowlist 추가 (반복 가능)
     --severity high,critical \    # nuclei passthrough
@@ -41,9 +50,13 @@ dast_harness/
   runner.py          # 단일 스캐너: start_scan / get_status / get_results / stop_scan / wait
   orchestrator.py    # MultiScanRunner: 여러 스캐너 병렬 실행 + 롤업/병합
   cli.py             # argparse 기반 one-shot CLI (python -m dast_harness scan)
+  validate.py        # ground truth 대비 탐지 정확도 채점 (python -m dast_harness.validate)
   reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
   reporters/json_reporter.py     # findings → JSON 문자열
   reporters/console_reporter.py  # 심각도별 콘솔 요약
+targets/compose.yml            # 통제 취약 타겟 컨테이너 (127.0.0.1 전용 게시)
+targets/vulnerable_app/app.py  # 의도적으로 취약한 stdlib 앱
+targets/vulnerable_app/ground_truth.json  # 이 앱이 가진 취약점 정답지
 example.py           # 단일 스캐너 예시
 example_multi.py     # 다중 스캐너 예시
 ```
@@ -154,6 +167,83 @@ nikto:
 - **`-nocheck` (항상)**: 시작 시 외부 업데이트 확인을 차단한다.
 - **`-ask no` (항상)**: 업데이트 제출 프롬프트를 띄우지 않는다.
 
+## 통제 취약 타겟 (targets/)
+
+정확도를 재려면 "무엇이 있는지 아는" 타겟이 필요하다. `targets/vulnerable_app`은
+그 목적으로 직접 만든 stdlib 전용 앱이고, 앱이 노출하는 모든 약점은
+`ground_truth.json`에 정답지로 적혀 있다. 테스트(`tests/test_target_app.py`)가
+정답지의 각 항목을 실제로 서빙하는지 확인하므로 앱과 정답지는 어긋날 수 없다.
+
+```bash
+docker compose -f targets/compose.yml up -d --build   # http://127.0.0.1:8080
+docker compose -f targets/compose.yml down
+```
+
+컨테이너는 **`127.0.0.1:8080`에만 게시**된다(LAN 노출 금지). 의도적으로 취약한
+앱이므로 포트 매핑을 `0.0.0.0`으로 바꾸지 말 것 — 이 불변식도 테스트로 고정돼 있다.
+`read_only`, `cap_drop: ALL`, `no-new-privileges`로 컨테이너 자체는 굳혀 둔다.
+
+Docker 없이 쓰려면 `python3 targets/vulnerable_app/app.py` (기본 바인드 `127.0.0.1`).
+
+정답지 항목: `/.env` 노출, `/.git/config` 노출, `/backup.sql` 노출, `/phpinfo.php`
+정보 누출, `/uploads/` 디렉터리 리스팅, `/admin/` 무인증 관리 페이지, 보안 헤더 누락.
+
+## 탐지 정확도 검증 (validate.py)
+
+```bash
+docker compose -f targets/compose.yml up -d --build
+python -m dast_harness.validate                 # 사람이 읽는 요약
+python -m dast_harness.validate --json          # 기계용 (stdout은 순수 JSON)
+```
+
+정답지 항목마다 "어느 스캐너가 무슨 finding으로 탐지했는가"를 붙이고 **recall**
+(= 탐지된 항목 / 전체 항목)을 계산한다. 매칭은 finding의 id·name에 대한 키워드
+매칭이며, 정답지 순서상 **먼저 나온 항목이 이긴다**(구체적인 항목을 위에 둘 것).
+한 finding이 두 항목에 중복 계상되지 않는다.
+
+정답지에 매칭되지 않은 finding은 **false positive가 아니라 `unexpected`(수동 트리아지
+대상)** 로 분류한다. 타겟이 정답지에 안 적힌 것을 노출할 수도 있으므로(예: robots.txt),
+사람이 보기 전에 오탐으로 단정하지 않는다.
+
+종료 코드: `0` 전부 탐지, `1` 하나 이상 미탐, `2` 인자·대상 오류, `130` 중단.
+
+### 실측 결과 (nuclei v3.11.1 + nikto 2.6.1, 기본 설정 전체 템플릿)
+
+```
+detected 7/7 documented weaknesses (recall 100%)
+
+  [x] exposed-dotenv            /.env          nikto, nuclei
+  [x] exposed-git-config        /.git/config   nikto, nuclei
+  [x] exposed-db-backup         /backup.sql    nikto
+  [x] phpinfo-disclosure        /phpinfo.php   nikto
+  [x] directory-listing         /uploads/      nikto
+  [x] exposed-admin-panel       /admin/        nikto
+  [x] missing-security-headers  /              nikto, nuclei
+
+unexpected findings (manual triage needed): 16  [high: 1, info: 10, low: 1, medium: 1, unknown: 3]
+```
+
+recall은 100%지만 **정답지 7개 중 4개는 nikto 단독 탐지**였다. 스캐너 하나로는
+같은 수치가 나오지 않는다 — 다중 스캐너 하네스를 만든 이유가 여기서 수치로 확인된다.
+
+`unexpected` 16건을 직접 트리아지한 결과 네 부류였고, 자동으로 오탐이라 부르지
+않은 이유가 그대로 드러난다.
+
+| 부류 | 건수 | 예시 | 판정 |
+|---|---|---|---|
+| 이미 탐지된 항목의 **다른 이름** | 2 | nuclei `MySQL - Dump Files` @ `/backup.sql`, `Laravel - Sensitive Information Disclosure` @ `/.env` | 진짜 탐지. 키워드 사전(`match_any`)이 못 잡은 것 |
+| **다른 포트/프로토콜**로 새어나간 스캔 | 9 | `SMB Version - Detection` @ `127.0.0.1:445`, mDNS@5353, SNMP@161 | 타겟 밖. 아래 참고 |
+| 정답지에 없지만 **실재하는 노출** | 4 | `robots.txt` 항목 노출 (nuclei 2건, nikto 2건) | 진짜. 정답지를 좁게 잡은 결과 |
+| **오탐** | 1 | nikto `PHP Easter Eggs` @ `/?=PHPB8B5F2A0-...` | 앱이 쿼리스트링을 무시하고 `/`를 200으로 돌려주므로 오탐 |
+
+즉 "정답지에 없다 = 오탐"이 아니다. 16건 중 실제 오탐은 1건이었고, 2건은 채점기의
+키워드 사전 한계였다. 이 구분을 자동화하지 않고 사람이 보게 남겨둔 것이 설계 의도다.
+
+> **스코프 관찰**: nuclei는 URL의 포트(8080)뿐 아니라 **같은 호스트의 다른 포트**
+> (445/5353/161)에도 network 템플릿을 던졌다. 대상 인증(`safety.py`)은 호스트
+> 단위이므로 loopback 안에서 끝났지만, 허가된 원격 호스트를 스캔할 때는 "허가한
+> 포트"보다 넓게 나갈 수 있다는 뜻이다. 알려진 한계로 기록해 둔다.
+
 ## 실행 (macOS 등 nuclei 설치 환경)
 
 ```bash
@@ -188,3 +278,6 @@ runner.wait(scan_id)         # 완료 대기
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+의존성·도커·스캐너 설치 없이 전부 돌아간다(가짜 스캐너와 인메모리 타겟 사용).
+실제 도구를 쓰는 측정은 `python -m dast_harness.validate`로 분리돼 있다.
