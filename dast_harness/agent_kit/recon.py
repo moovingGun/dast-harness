@@ -98,6 +98,9 @@ class ReconAgent(Agent):
         self.max_pages = max_pages
         self.seeds: dict[tuple[str, str], RequestSeed] = {}   # (method, template) -> seed
         self.exchanges: dict[str, object] = {}   # url -> HttpExchange (증거 재사용)
+        # url -> 잘리지 않은 본문. exchange.response_excerpt는 증거용으로 잘려
+        # 있으므로 파싱에 쓰면 경계 뒤의 폼이 조용히 사라진다.
+        self.bodies: dict[str, str] = {}
 
     # ------------------------------------------------------------------- 수집
     def _add(self, seed: RequestSeed) -> None:
@@ -203,13 +206,14 @@ class ReconAgent(Agent):
         seen: set[str] = set()
         queue: deque[tuple[str, str]] = deque([(base, "seed")])
 
-        robots = self.client.get(
+        robots, robots_body = self.client.fetch(
             _join(base, "/robots.txt"), note="정찰: robots.txt는 비공개 경로를 광고한다"
         )
         self.exchanges[robots.url] = robots
+        self.bodies[robots.url] = robots_body
         if robots.status == 200:
             self._record(robots, "guess")
-            for line in robots.response_excerpt.splitlines():
+            for line in robots_body.splitlines():
                 if ":" in line and line.split(":", 1)[0].strip().lower() in ("disallow", "allow"):
                     path = line.split(":", 1)[1].strip()
                     if path and path != "/":
@@ -222,13 +226,17 @@ class ReconAgent(Agent):
                 continue
             seen.add(norm)
 
-            ex = self.client.get(norm, note=f"정찰: {source}에서 발견")
+            ex, page = self.client.fetch(norm, note=f"정찰: {source}에서 발견")
             self.exchanges[norm] = ex
+            self.bodies[norm] = page
             self._record(ex, source)
 
             if "html" in _ct(ex.response_headers).lower():
-                self._record_forms(norm, ex.response_excerpt)
-                for href in HREF.findall(ex.response_excerpt):
+                self._record_forms(norm, page)
+                for raw_href in HREF.findall(page):
+                    # HTML 엔티티를 풀지 않으면 `?a=1&amp;b=2`가 그대로 요청되고
+                    # 파라미터 이름이 `amp;b`로 잡힌다.
+                    href = html.unescape(raw_href)
                     # resolve()가 같은 origin이 아니면 None을 준다 — 타겟 페이지에
                     # 심어진 외부 링크(프롬프트 인젝션 포함)를 여기서 1차로 거른다.
                     nxt = self.client.resolve(norm, href)
@@ -242,13 +250,14 @@ class ReconAgent(Agent):
         지금은 예시로 하나만 본다: robots.txt가 광고한 경로가 실제로 접근되는가.
         증거는 항상 "기준선 + 대조"로 만든다.
         """
-        robots = self.exchanges.get(_join(base, "/robots.txt"))
+        robots_url = _join(base, "/robots.txt")
+        robots = self.exchanges.get(robots_url)
         if robots is None or robots.status != 200:
             return
 
         disallowed = [
             line.split(":", 1)[1].strip()
-            for line in robots.response_excerpt.splitlines()
+            for line in self.bodies.get(robots_url, "").splitlines()
             if line.lower().startswith("disallow:") and line.split(":", 1)[1].strip() not in ("", "/")
         ]
         reachable = [

@@ -110,6 +110,19 @@ ex = self.client.post(url, actor="alice", body="username=alice&password=alice123
 - `client.resolve(base, href)`는 **다른 origin이면 `None`**을 준다. 페이지에서 뽑은
   링크는 이걸 통과시켜라
 
+### HTML을 파싱하려면 `fetch()`를 쓴다
+
+```python
+exchange, body = self.client.fetch(url, note="정찰: 링크·폼 수집")
+```
+
+`exchange.response_excerpt`는 **증거용으로 2048자에서 잘린다.** 그걸로 HTML을
+파싱하면 잘림 경계 뒤의 폼·링크가 **조용히 사라진다** — 오류도 경고도 없다.
+증거에 넣을 건 `exchange`, 파싱할 건 `body`다.
+
+응답에서 문자열 하나만 찾으면 되는 경우(오류 문구, 메시지 차이 등)는
+`get()`/`post()`의 `response_excerpt`로 충분하다.
+
 ---
 
 ## 4. finding 만들기

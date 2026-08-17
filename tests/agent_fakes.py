@@ -47,6 +47,12 @@ class FakeClient:
     def post(self, url, **kw):
         return self._exchange("POST", url, self.post_pages, kw)
 
+    def fetch(self, url, **kw):
+        """GET + 잘리지 않은 본문. 실제 클라이언트와 같은 (exchange, body) 쌍."""
+        exchange = self._exchange("GET", url, self.pages, kw)
+        _, _, body = self.pages.get(url, (404, "text/plain", ""))
+        return exchange, body
+
     def resolve(self, base, href):
         """Same contract as the real client: cross-origin returns None."""
         if href.startswith("http"):

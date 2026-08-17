@@ -24,6 +24,10 @@ from .contract import MAX_EXCERPT, HttpExchange
 
 DEFAULT_UA = "dast-harness-agent/0.1 (+local scan)"
 
+# 파싱용 본문 상한. 증거용 `MAX_EXCERPT`(2048자)와 **별개**다 — 증거는 리포트에
+# 실리므로 짧아야 하지만, 링크·폼을 파싱하는 쪽은 페이지 전체가 필요하다.
+MAX_BODY = 131072
+
 
 class RequestBudgetExceeded(RuntimeError):
     """에이전트 루프가 폭주했다. 통제 타겟이라도 무한 요청은 막는다."""
@@ -106,6 +110,29 @@ class AgentHttpClient:
             TargetNotAuthorizedError: 대상이 허가 범위 밖 — 에이전트가 삼키지 말 것
             RequestBudgetExceeded: 예산 초과
         """
+        exchange, _ = self._send(method, url, actor=actor, headers=headers,
+                                 body=body, note=note)
+        return exchange
+
+    def fetch(self, url: str, **kw) -> tuple[HttpExchange, str]:
+        """GET + **잘리지 않은 본문**. 링크·폼을 파싱하는 쪽이 쓴다.
+
+        `HttpExchange.response_excerpt`는 증거용으로 `MAX_EXCERPT`에서 잘린다.
+        그걸로 HTML을 파싱하면 **잘림 경계 뒤의 폼이 통째로 사라진다** — 조용히,
+        아무 경고도 없이. 파싱은 이 메서드가 주는 본문으로 한다.
+        """
+        return self._send("GET", url, **kw)
+
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        actor: str = "anon",
+        headers: dict[str, str] | None = None,
+        body: str | bytes | None = None,
+        note: str = "",
+    ) -> tuple[HttpExchange, str]:
         if self.request_count >= self.max_requests:
             raise RequestBudgetExceeded(
                 f"요청 예산 {self.max_requests}건 초과. 루프가 폭주했는지 확인할 것."
@@ -138,13 +165,13 @@ class AgentHttpClient:
             with self._opener(actor).open(req, timeout=self.timeout) as resp:
                 status = resp.status
                 resp_headers = dict(resp.headers.items())
-                text = _decode(resp.read(MAX_EXCERPT * 4), resp_headers)
+                text = _decode(resp.read(MAX_BODY), resp_headers)
         except urllib.error.HTTPError as exc:
             # 4xx/5xx와, _NoRedirect 때문에 여기로 오는 3xx.
             status = exc.code
             resp_headers = dict(exc.headers.items()) if exc.headers else {}
             try:
-                text = _decode(exc.read(MAX_EXCERPT * 4), resp_headers)
+                text = _decode(exc.read(MAX_BODY), resp_headers)
             except Exception:
                 text = ""
         except (urllib.error.URLError, OSError, ValueError) as exc:
@@ -154,7 +181,7 @@ class AgentHttpClient:
             if self.delay:
                 time.sleep(self.delay)
 
-        return HttpExchange(   # __post_init__이 마스킹·길이 제한을 강제한다
+        exchange = HttpExchange(   # __post_init__이 마스킹·길이 제한을 강제한다
             method=method.upper(),
             url=url,
             status=status,
@@ -166,6 +193,8 @@ class AgentHttpClient:
             note=note,
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
+        # 증거는 잘린 excerpt, 파싱은 전체 본문. 둘을 섞지 않는다.
+        return exchange, text
 
     def get(self, url: str, **kw) -> HttpExchange:
         return self.request("GET", url, **kw)
