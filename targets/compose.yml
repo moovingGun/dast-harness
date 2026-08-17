@@ -1,0 +1,17 @@
+# Controlled vulnerable target for dast-harness.
+#   docker compose -f targets/compose.yml up -d --build
+#   docker compose -f targets/compose.yml down
+services:
+  vulnerable-target:
+    build: ./vulnerable_app
+    container_name: dast-harness-target
+    ports:
+      # Loopback only: this app is deliberately vulnerable and must never be
+      # reachable from the LAN. The harness's own safety check also requires it.
+      - "127.0.0.1:8080:8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
