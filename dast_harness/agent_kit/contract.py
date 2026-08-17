@@ -376,7 +376,7 @@ def validate_result(r: AgentResult) -> list[str]:
 
 
 def validate_finding(f: Finding) -> list[str]:
-    """CLAUDE.md의 계약 5개를 검사. 빈 리스트면 통과.
+    """CLAUDE.md의 계약 6개를 검사. 빈 리스트면 통과.
 
     문서로만 둔 약속은 주말 이틀이면 무너지지만 assert는 안 무너진다.
     커밋 전에, 그리고 CI에서 돌린다.
