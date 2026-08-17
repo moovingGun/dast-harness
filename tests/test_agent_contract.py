@@ -12,10 +12,13 @@ import unittest
 from dataclasses import asdict
 
 from dast_harness import Finding, Severity
+from dast_harness.agent_kit import Agent
 from dast_harness.agent_kit.contract import (MASKED, MAX_EXCERPT, AgentFinding,
-                                             Confidence, Coverage, Endpoint,
-                                             Evidence, HttpExchange, Probe,
-                                             finding_to_dict, validate_finding)
+                                             AgentResult, Confidence, Coverage,
+                                             Endpoint, Evidence, HttpExchange,
+                                             Probe, finding_to_dict,
+                                             validate_finding, validate_result)
+from dast_harness.agent_kit.recon import ReconAgent
 
 
 def _probe(**kw):
@@ -367,6 +370,185 @@ class SerializationTest(unittest.TestCase):
                          "/api/orders/{id}")
         self.assertEqual(round_tripped["coverage"]["skip_reasons"],
                          {"no-auth-session": 1})
+
+
+class FakeClient:
+    """A stand-in for AgentHttpClient: enough for ReconAgent, no sockets.
+
+    Only what an agent is allowed to touch — get/resolve/request_count/blocked.
+    """
+
+    def __init__(self, pages):
+        self.pages = pages                 # url -> (status, content_type, body)
+        self.request_count = 0
+        self.blocked = []
+
+    def get(self, url, **kw):
+        self.request_count += 1
+        status, content_type, body = self.pages.get(url, (404, "text/plain", ""))
+        return HttpExchange(method="GET", url=url, status=status,
+                            actor=kw.get("actor", "anon"),
+                            response_headers={"Content-Type": content_type},
+                            response_excerpt=body, note=kw.get("note", ""))
+
+    def resolve(self, base, href):
+        if href.startswith("http"):
+            return href if href.startswith("http://t.invalid") else None
+        return "http://t.invalid" + (href if href.startswith("/") else "/" + href)
+
+
+class AgentResultTest(unittest.TestCase):
+    """The per-agent return value, not just the per-finding shape.
+
+    Getting Finding right is not enough to merge three agents: if one returns
+    a dict of endpoints and another a list of tuples, the orchestrator cannot
+    treat them alike. This used to be a bare dict with nothing checking it.
+    """
+
+    def _result(self, **kw):
+        base = dict(
+            agent="idor",
+            findings=[_agent_finding()],
+            coverage=Coverage(unit="object-id", tested=4, findings=1),
+        )
+        return AgentResult(**{**base, **kw})
+
+    def test_well_formed_result_passes(self):
+        self.assertEqual(validate_result(self._result()), [])
+
+    def test_missing_agent_name_is_rejected(self):
+        errs = validate_result(self._result(agent=""))
+        self.assertTrue(any("agent가 비어" in e for e in errs), errs)
+
+    def test_missing_coverage_is_rejected(self):
+        # 0 findings with no coverage cannot be told apart from "never looked".
+        errs = validate_result(AgentResult(agent="idor", coverage=None))
+        self.assertTrue(any("coverage가 없음" in e for e in errs), errs)
+
+    def test_empty_result_with_coverage_passes(self):
+        # Finding nothing is a legitimate outcome and must not be an error.
+        empty = AgentResult(agent="idor",
+                            coverage=Coverage(unit="object-id", tested=9, findings=0))
+        self.assertEqual(validate_result(empty), [])
+
+    def test_coverage_unit_outside_vocabulary_is_rejected(self):
+        errs = validate_result(self._result(
+            coverage=Coverage(unit="objects", tested=4, findings=1)))
+        self.assertTrue(any("coverage.unit" in e for e in errs), errs)
+
+    def test_stale_coverage_count_is_rejected(self):
+        errs = validate_result(self._result(
+            coverage=Coverage(unit="object-id", tested=4, findings=7)))
+        self.assertTrue(any("coverage.findings" in e for e in errs), errs)
+
+    def test_finding_from_another_agent_is_rejected(self):
+        # Copying someone else's agent and forgetting to change `name` lands here.
+        errs = validate_result(self._result(agent="injection"))
+        self.assertTrue(any("scanner가" in e for e in errs), errs)
+
+    def test_finding_level_rules_are_checked_too(self):
+        bad = _agent_finding(evidence=None)
+        errs = validate_result(self._result(findings=[bad]))
+        self.assertTrue(any("evidence가 없음" in e for e in errs), errs)
+
+    def test_result_is_json_serializable(self):
+        payload = json.dumps(self._result(
+            endpoints=[Endpoint(method="GET", url_template="/api/orders/{id}",
+                                params=("id",))],
+            requests_made=9,
+            blocked=[("http://attacker.example/exfil", "허가되지 않은 대상")],
+        ).to_dict(), ensure_ascii=False)
+        out = json.loads(payload)
+        self.assertEqual(out["agent"], "idor")
+        self.assertEqual(out["endpoints"][0]["url_template"], "/api/orders/{id}")
+        self.assertEqual(out["coverage"]["unit"], "object-id")
+        self.assertEqual(out["blocked"][0][1], "허가되지 않은 대상")
+
+
+class AgentBaseTest(unittest.TestCase):
+    """`Agent.finish()` is what stops three agents from drifting apart."""
+
+    class Stub(Agent):
+        name = "idor"
+        unit = "object-id"
+
+        def run(self, base):
+            return self.finish([], tested=3)
+
+    def _stub(self):
+        return self.Stub(FakeClient({}))
+
+    def test_finish_fills_coverage_and_counters(self):
+        agent = self._stub()
+        agent.client.request_count = 11
+        result = agent.run("http://t.invalid")
+        self.assertEqual(result.agent, "idor")
+        self.assertEqual(result.coverage.unit, "object-id")
+        self.assertEqual(result.coverage.tested, 3)
+        self.assertEqual(result.coverage.requests, 11)
+        self.assertEqual(result.requests_made, 11)
+
+    def test_finish_counts_findings_itself(self):
+        # Hand-counted coverage drifts; derived coverage cannot.
+        agent = self._stub()
+        result = agent.finish([_agent_finding()], tested=1)
+        self.assertEqual(result.coverage.findings, 1)
+
+    def test_finish_carries_blocked_requests(self):
+        # Prompt-injection attempts show up here, so they must not be dropped.
+        agent = self._stub()
+        agent.client.blocked = [("http://attacker.example/exfil", "허가되지 않은 대상")]
+        self.assertEqual(agent.run("http://t.invalid").blocked,
+                         [("http://attacker.example/exfil", "허가되지 않은 대상")])
+
+    def test_finish_raises_on_a_contract_violation(self):
+        agent = self._stub()
+        stray = _agent_finding(scanner="agent:recon")   # wrong agent
+        with self.assertRaises(AssertionError):
+            agent.finish([stray], tested=1)
+
+    def test_skip_reasons_are_recorded(self):
+        result = self._stub().finish([], tested=0, skipped=3,
+                                     skip_reasons={"no-auth-session": 3})
+        self.assertEqual(result.coverage.skipped, 3)
+        self.assertEqual(result.coverage.skip_reasons, {"no-auth-session": 3})
+
+
+class ReconSkeletonTest(unittest.TestCase):
+    """recon.py is the file the other two agents get copied from.
+
+    If the skeleton drifts from the contract, both copies inherit the drift, so
+    it is pinned here. Runs against a fake client: no server, no sockets.
+    """
+
+    PAGES = {
+        "http://t.invalid/robots.txt": (
+            200, "text/plain", "User-agent: *\nDisallow: /admin/\n"),
+        "http://t.invalid/": (
+            200, "text/html", '<a href="/admin/">admin</a>'),
+        "http://t.invalid/admin/": (200, "text/html", "<h1>Administrator Login</h1>"),
+    }
+
+    def _run(self):
+        return ReconAgent(FakeClient(self.PAGES)).run("http://t.invalid")
+
+    def test_recon_is_an_agent(self):
+        self.assertTrue(issubclass(ReconAgent, Agent))
+
+    def test_recon_returns_a_valid_agent_result(self):
+        result = self._run()
+        self.assertIsInstance(result, AgentResult)
+        self.assertEqual(validate_result(result), [])
+
+    def test_recon_reports_endpoints_and_a_finding(self):
+        result = self._run()
+        templates = {e.url_template for e in result.endpoints}
+        self.assertIn("/admin/", templates)
+        self.assertEqual([f.finding_id for f in result.findings],
+                         ["robots-discloses-reachable-paths"])
+
+    def test_recon_result_serializes(self):
+        json.dumps(self._run().to_dict(), ensure_ascii=False)
 
 
 if __name__ == "__main__":
