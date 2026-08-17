@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dast-harness"
+description = "Minimal local-only DAST harness that runs several scanners behind one interface."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "mooovinggun" }]
+keywords = ["dast", "security", "nuclei", "nikto", "scanner"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/moovingGun/dast-harness"
+
+[project.scripts]
+dast-harness = "dast_harness.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "dast_harness.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["dast_harness*"]
