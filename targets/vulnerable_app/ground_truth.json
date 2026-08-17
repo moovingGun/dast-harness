@@ -1,0 +1,68 @@
+{
+  "target": "http://127.0.0.1:8080",
+  "notes": "Weaknesses deliberately served by app.py. `match_any` holds lowercase substrings; a scanner finding counts as a detection when its id/name contains one of them and it was observed at `path`.",
+  "expected": [
+    {
+      "id": "exposed-dotenv",
+      "path": "/.env",
+      "category": "exposure",
+      "description": "Environment file with app key and database/AWS credentials served publicly",
+      "body_contains": "DB_PASSWORD=",
+      "match_any": ["dotenv", ".env", "env file", "environment file"]
+    },
+    {
+      "id": "exposed-git-config",
+      "path": "/.git/config",
+      "category": "exposure",
+      "description": "Git repository config exposed, leaking the upstream remote",
+      "body_contains": "repositoryformatversion",
+      "match_any": ["git config", "git-config", ".git", "git repository"]
+    },
+    {
+      "id": "exposed-db-backup",
+      "path": "/backup.sql",
+      "category": "exposure",
+      "description": "SQL dump with user table and password hashes downloadable without auth",
+      "body_contains": "INSERT INTO `users`",
+      "match_any": ["backup", "sql dump", "database dump", ".sql"]
+    },
+    {
+      "id": "phpinfo-disclosure",
+      "path": "/phpinfo.php",
+      "category": "information-disclosure",
+      "description": "phpinfo() page disclosing PHP version, paths and module config",
+      "body_contains": "PHP Version 7.4.3",
+      "match_any": ["phpinfo", "php info"]
+    },
+    {
+      "id": "directory-listing",
+      "path": "/uploads/",
+      "category": "misconfiguration",
+      "description": "Upload directory serves an auto-index of stored files",
+      "body_contains": "Index of /uploads",
+      "match_any": ["directory listing", "dir-listing", "index of", "directory indexing", "browsable"]
+    },
+    {
+      "id": "exposed-admin-panel",
+      "path": "/admin/",
+      "category": "misconfiguration",
+      "description": "Unauthenticated admin login page advertising default credentials",
+      "body_contains": "Administrator Login",
+      "match_any": ["admin", "login panel", "default credential"]
+    },
+    {
+      "id": "missing-security-headers",
+      "path": "/",
+      "category": "misconfiguration",
+      "description": "No X-Frame-Options / CSP / X-Content-Type-Options on any response",
+      "body_contains": "Acme Intranet",
+      "absent_headers": [
+        "x-frame-options",
+        "content-security-policy",
+        "x-content-type-options",
+        "strict-transport-security"
+      ],
+      "match_any": ["security header", "x-frame-options", "clickjacking", "content-security-policy", "content security policy", "x-content-type-options"]
+    }
+  ]
+}
