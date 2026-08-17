@@ -64,6 +64,39 @@ class Deaf(Scanner):
         return _outcome(parsed_records=0)
 
 
+class Good2(Good):
+    name = "good2"
+
+
+class SpyGood(Scanner):
+    name = "spy"
+    runs = 0
+
+    def is_available(self):
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        type(self).runs += 1
+        return _outcome(parsed_records=0)
+
+
+class SlowButStops(Scanner):
+    """Runs past the deadline but completes promptly once stop is requested;
+    its final status is COMPLETED (not stopped)."""
+
+    name = "slow"
+
+    def is_available(self):
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        for _ in range(300):
+            if stop_event is not None and stop_event.is_set():
+                break
+            time.sleep(0.02)
+        return _outcome(parsed_records=0)
+
+
 def run_cli(argv):
     """Run the CLI, swallowing stdout, returning (exit_code, stdout)."""
     out = io.StringIO()
@@ -163,6 +196,83 @@ class CliTests(unittest.TestCase):
         finally:
             MultiScanRunner.wait = orig
         self.assertEqual(code, 130)
+
+    # --- Problem 1: explicitly requested scanner missing -----------------
+    def test_explicit_missing_scanner_exits_2_without_scanning(self):
+        SpyGood.runs = 0
+        cli.SCANNERS = {"spy": SpyGood, "off": Unavailable}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out = run_cli(["scan", LOCAL, "--scanner", "spy,off"])
+        self.assertEqual(code, 2)
+        self.assertEqual(SpyGood.runs, 0)          # no scan was started
+        self.assertIn("off", err.getvalue())       # names the missing scanner
+
+    def test_explicit_all_available_runs(self):
+        cli.SCANNERS = {"good": Good, "good2": Good2}
+        code, _ = run_cli(["scan", LOCAL, "--scanner", "good,good2"])
+        self.assertEqual(code, 0)
+
+    def test_scanner_omitted_selects_available(self):
+        cli.SCANNERS = {"good": Good, "off": Unavailable}
+        code, _ = run_cli(["scan", LOCAL])  # no --scanner
+        self.assertEqual(code, 0)
+
+    # --- Problem 2: deadline expiry must win over a late completion -------
+    def test_timeout_then_completion_in_grace_exits_124(self):
+        cli.SCANNERS = {"slow": SlowButStops}
+        code, _ = run_cli(["scan", LOCAL, "--scanner", "slow", "--timeout", "0.1"])
+        self.assertEqual(code, 124)
+
+    def test_completes_before_deadline_exits_0(self):
+        cli.SCANNERS = {"good": Good}
+        code, _ = run_cli(["scan", LOCAL, "--scanner", "good", "--timeout", "10"])
+        self.assertEqual(code, 0)
+
+    # --- Problem 3: output write errors ----------------------------------
+    def test_output_nonexistent_dir_exits_2(self):
+        cli.SCANNERS = {"good": Good}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, out = run_cli(
+                ["scan", LOCAL, "--scanner", "good", "-o", "/no/such/dir/r.json"]
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("error", err.getvalue())
+        self.assertNotIn("wrote", out)  # no partial success on stdout
+
+    def test_output_write_error_mock_exits_2(self):
+        import unittest.mock as mock
+        cli.SCANNERS = {"good": Good}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with mock.patch("builtins.open", side_effect=OSError("disk full")):
+                code, out = run_cli(
+                    ["scan", LOCAL, "--scanner", "good", "-o", "/tmp/whatever.json"]
+                )
+        self.assertEqual(code, 2)
+        self.assertIn("error", err.getvalue())
+        self.assertNotIn("wrote", out)
+
+    # --- Problem 4: option combination validation ------------------------
+    def test_include_raw_requires_json(self):
+        cli.SCANNERS = {"good": Good}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _ = run_cli(["scan", LOCAL, "--scanner", "good", "--include-raw"])
+        self.assertEqual(code, 2)
+        self.assertIn("json", err.getvalue().lower())
+
+    def test_invalid_timeout_values_exit_2(self):
+        cli.SCANNERS = {"good": Good}
+        for bad in ("0", "-1", "nan", "inf"):
+            with self.subTest(timeout=bad):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    code, _ = run_cli(
+                        ["scan", LOCAL, "--scanner", "good", "--timeout", bad]
+                    )
+                self.assertEqual(code, 2, f"timeout={bad}")
 
 
 if __name__ == "__main__":

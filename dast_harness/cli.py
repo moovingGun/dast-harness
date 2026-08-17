@@ -13,6 +13,7 @@ Thin wrapper over MultiScanRunner + the reporters. Exit codes:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 
 from .models import ScanConfig, Severity, Target
@@ -106,22 +107,46 @@ def _select_scanners(spec: str | None):
     return [SCANNERS[n]() for n in ordered]
 
 
-def _emit(runner, scan_id, args) -> None:
+def _emit(runner, scan_id, args) -> bool:
+    """Render and output the report. Returns False (and reports to stderr) if
+    writing the output file failed, without printing a partial success."""
     report = build_report(runner, scan_id)
     if args.format == "json":
         text = JSONReporter(include_raw=args.include_raw).render(report)
     else:
         text = ConsoleReporter().render(report)
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as fh:
-            fh.write(text + "\n")
+        try:
+            with open(args.output, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+        except OSError as exc:
+            print(f"error: cannot write output file {args.output!r}: {exc}",
+                  file=sys.stderr)
+            return False
         print(f"wrote {args.output}")
     else:
         print(text)
+    return True
+
+
+def _validate_options(args) -> str | None:
+    """Return an error message for an invalid option combination, else None."""
+    if args.include_raw and args.format != "json":
+        return "--include-raw requires --format json"
+    if args.timeout is not None and (
+        not math.isfinite(args.timeout) or args.timeout <= 0
+    ):
+        return "--timeout must be a finite positive number"
+    return None
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+
+    option_error = _validate_options(args)
+    if option_error is not None:
+        print(f"error: {option_error}", file=sys.stderr)
+        return EXIT_USAGE
 
     try:
         config = _build_config(args)
@@ -129,6 +154,15 @@ def main(argv=None) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+
+    if args.scanner is not None:
+        # Explicitly requested scanners must all be installed; do not silently
+        # run a subset. (Omitting --scanner keeps the "available only" policy.)
+        missing = [s.name for s in scanners if not s.is_available()]
+        if missing:
+            print(f"error: requested scanner(s) not installed: "
+                  f"{', '.join(missing)}", file=sys.stderr)
+            return EXIT_USAGE
 
     available = [s for s in scanners if s.is_available()]
     if not available:
@@ -142,19 +176,20 @@ def main(argv=None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
-    timed_out = False
     try:
-        status = runner.wait(scan_id, timeout=args.timeout)
-        if args.timeout is not None and status["status"] in ("running", "stopped"):
-            timed_out = True
+        runner.wait(scan_id, timeout=args.timeout)
     except KeyboardInterrupt:
         runner.stop_scan(scan_id)
         runner.wait(scan_id, timeout=_STOP_GRACE)
         _emit(runner, scan_id, args)
         return EXIT_INTERRUPT
 
-    _emit(runner, scan_id, args)
-    if timed_out:
+    if not _emit(runner, scan_id, args):
+        return EXIT_USAGE
+
+    # A timeout that expired wins even if the final status became 'completed'
+    # during the grace window (explicit signal from the runner, not a guess).
+    if runner.timed_out(scan_id):
         return EXIT_TIMEOUT
     overall = runner.get_status(scan_id)["status"]
     if overall in ("completed", "completed_with_warnings"):

@@ -35,6 +35,7 @@ class MultiScanRunner:
             s.name: ScanRunner(s, self.allowlist) for s in scanners
         }
         self._groups: dict[str, dict[str, str]] = {}  # group_id -> {name: child_id}
+        self._timed_out: dict[str, bool] = {}  # group_id -> deadline was hit
         self._lock = threading.Lock()
 
     def start_scan(self, target: Target, config: ScanConfig | None = None) -> str:
@@ -165,5 +166,16 @@ class MultiScanRunner:
             deadline is not None
             and self.get_status(group_id)["status"] == ScanStatus.RUNNING.value
         ):
+            # Record that the deadline actually expired and we initiated a stop,
+            # so callers don't have to infer timeout from the final status
+            # (which may become 'completed' during the grace window).
+            with self._lock:
+                self._timed_out[group_id] = True
             self._stop_and_reap(mapping)
         return self.get_status(group_id)
+
+    def timed_out(self, group_id: str) -> bool:
+        """True if wait() hit the group deadline and initiated a stop."""
+        self._mapping(group_id)  # KeyError if unknown
+        with self._lock:
+            return self._timed_out.get(group_id, False)
