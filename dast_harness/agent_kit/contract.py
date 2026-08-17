@@ -9,7 +9,7 @@ v0가 팀에서 승인되면 이 파일의 필드를 `models.py`의 `Finding`으
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 from ..models import Finding, Severity
@@ -156,6 +156,73 @@ class Endpoint:
     source: str = ""                 # "link" | "robots.txt" | "guess"
 
 
+@dataclass
+class AgentResult:
+    """에이전트 `run()`의 반환값. **세 에이전트가 같은 모양을 낸다.**
+
+    `Finding` 하나의 모양만 맞춰도 합칠 수 없다 — 에이전트 단위 산출물도 같아야
+    오케스트레이터가 셋을 똑같이 다룰 수 있다. 전에는 그냥 dict였고 키 이름을
+    지켜주는 게 아무것도 없었다.
+
+    보통 손으로 만들지 않고 `Agent.finish()`가 채워서 돌려준다.
+    """
+
+    agent: str                                   # "recon" (scanner는 f"agent:{agent}")
+    findings: list[Finding] = field(default_factory=list)
+    coverage: Coverage | None = None
+    endpoints: list[Endpoint] = field(default_factory=list)   # 정찰만 채운다
+    requests_made: int = 0
+    blocked: list[tuple[str, str]] = field(default_factory=list)  # 안전장치가 거부
+
+    def to_dict(self) -> dict:
+        return {
+            "agent": self.agent,
+            "findings": [finding_to_dict(f) for f in self.findings],
+            "coverage": asdict(self.coverage) if self.coverage is not None else None,
+            "endpoints": [asdict(e) for e in self.endpoints],
+            "requests_made": self.requests_made,
+            "blocked": [list(b) for b in self.blocked],
+        }
+
+
+def validate_result(r: AgentResult) -> list[str]:
+    """`AgentResult` 하나를 검사. 빈 리스트면 통과. `Agent.finish()`가 돌린다.
+
+    findings 각각의 규칙(§4)까지 여기서 같이 본다 — 에이전트가 낸 결과 전체를
+    한 번에 검사할 수 있어야 CI에 걸 수 있다.
+    """
+    errs: list[str] = []
+
+    if not r.agent:
+        errs.append("AgentResult.agent가 비어 있음 (에이전트 이름)")
+
+    if r.coverage is None:
+        # 0건일 때 "못 찾았다"와 "안 찾아봤다"를 구별하려면 반드시 있어야 한다.
+        errs.append("coverage가 없음 (findings가 0건이어도 남긴다)")
+    else:
+        if r.coverage.unit not in TARGET_KINDS:
+            errs.append(
+                f"coverage.unit이 어휘 밖: {r.coverage.unit!r} "
+                f"(허용: {', '.join(TARGET_KINDS)})"
+            )
+        if r.coverage.findings != len(r.findings):
+            errs.append(
+                f"coverage.findings({r.coverage.findings})가 실제 findings "
+                f"{len(r.findings)}건과 다름"
+            )
+
+    expected_scanner = f"agent:{r.agent}"
+    for f in r.findings:
+        if r.agent and f.scanner != expected_scanner:
+            # 남의 에이전트를 베껴 쓰면서 name만 안 바꾼 경우가 여기서 걸린다.
+            errs.append(
+                f"{f.finding_id}: scanner가 {f.scanner!r} (기대: {expected_scanner!r})"
+            )
+        errs.extend(f"{f.finding_id}: {e}" for e in validate_finding(f))
+
+    return errs
+
+
 def validate_finding(f: Finding) -> list[str]:
     """CLAUDE.md의 계약 5개를 검사. 빈 리스트면 통과.
 
@@ -256,7 +323,7 @@ def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
 
 __all__ = [
     "Confidence", "HttpExchange", "Evidence", "AgentFinding", "Endpoint",
-    "Probe", "Coverage", "TARGET_KINDS",
-    "validate_finding", "finding_to_dict", "CATEGORIES", "MAX_EXCERPT",
-    "Severity",
+    "Probe", "Coverage", "AgentResult", "TARGET_KINDS",
+    "validate_finding", "validate_result", "finding_to_dict",
+    "CATEGORIES", "MAX_EXCERPT", "Severity",
 ]

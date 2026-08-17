@@ -20,8 +20,9 @@ from collections import deque
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from ..models import Severity
-from .contract import (AgentFinding, Confidence, Coverage, Endpoint, Evidence,
-                       Probe, validate_finding)
+from .base import Agent
+from .contract import (AgentFinding, AgentResult, Confidence, Endpoint,
+                       Evidence, Probe)
 from .http import AgentHttpClient
 
 HREF = re.compile(r"""(?:href|src|action)\s*=\s*["']([^"'>\s]+)""", re.I)
@@ -37,13 +38,14 @@ def _templatize(path: str) -> str:
     return "/".join(segs)
 
 
-class ReconAgent:
+class ReconAgent(Agent):
     """같은 origin을 얕게 훑어 엔드포인트를 모으고, 정찰 고유 취약점을 낸다."""
 
     name = "recon"                       # scanner 값은 f"agent:{name}"
+    unit = "endpoint"                    # Coverage.unit — 정찰은 엔드포인트를 센다
 
     def __init__(self, client: AgentHttpClient, *, max_pages: int = 40) -> None:
-        self.client = client
+        super().__init__(client)
         self.max_pages = max_pages
         self.endpoints: dict[tuple[str, str], Endpoint] = {}
         self.findings: list[AgentFinding] = []
@@ -162,26 +164,18 @@ class ReconAgent:
         ))
 
     # -------------------------------------------------------------------- 실행
-    def run(self, base: str) -> dict:
+    def run(self, base: str) -> AgentResult:
         self.crawl(base)
         self._probe(base)
 
-        problems = {f.finding_id: errs for f in self.findings if (errs := validate_finding(f))}
-        if problems:   # 계약 위반은 조용히 넘기지 않는다
-            raise AssertionError(f"계약 위반: {problems}")
-
-        return {
-            "endpoints": sorted(self.endpoints.values(), key=lambda e: (e.url_template, e.method)),
-            "findings": self.findings,
-            "coverage": Coverage(
-                unit="endpoint",
-                tested=len(self.exchanges),
-                requests=self.client.request_count,
-                findings=len(self.findings),
-            ),
-            "requests_made": self.client.request_count,
-            "blocked": self.client.blocked,
-        }
+        # finish()가 coverage/요청수/blocked를 채우고 계약을 검사한다.
+        # 위반이면 AssertionError — 조용히 넘기지 않는다.
+        return self.finish(
+            self.findings,
+            tested=len(self.exchanges),
+            endpoints=sorted(self.endpoints.values(),
+                             key=lambda e: (e.url_template, e.method)),
+        )
 
 
 def _ct(headers: dict) -> str:
@@ -203,20 +197,23 @@ def main(argv: list[str]) -> int:
     client = AgentHttpClient(allowlist=set(), max_requests=200)
     result = ReconAgent(client).run(base)
 
-    print(f"엔드포인트 {len(result['endpoints'])}건 (요청 {result['requests_made']}회)")
-    for e in result["endpoints"]:
+    print(f"엔드포인트 {len(result.endpoints)}건 (요청 {result.requests_made}회)")
+    for e in result.endpoints:
         auth = {True: "auth", False: "open", None: "?"}[e.auth_required]
         params = f" ?{','.join(e.params)}" if e.params else ""
         print(f"  {e.method:4} {e.url_template:24}{params:12} {e.observed_status}  {auth:4} [{e.source}]")
 
-    print(f"\nfindings {len(result['findings'])}건")
-    for f in result["findings"]:
+    print(f"\nfindings {len(result.findings)}건")
+    for f in result.findings:
         print(f"  [{f.severity.value}/{f.confidence.value}] {f.finding_id} @ {f.matched_at}")
         print(f"      {f.description}")
 
-    if result["blocked"]:
-        print(f"\n안전장치가 거부한 요청 {len(result['blocked'])}건:")
-        for url, why in result["blocked"]:
+    cov = result.coverage
+    print(f"\ncoverage: {cov.unit} {cov.tested}건 검사, {cov.skipped}건 건너뜀")
+
+    if result.blocked:
+        print(f"\n안전장치가 거부한 요청 {len(result.blocked)}건:")
+        for url, why in result.blocked:
             print(f"  {url} — {why}")
     return 0
 

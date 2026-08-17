@@ -264,17 +264,51 @@ object-id    parameter    endpoint    header    path
 
 ## 5. 에이전트 `run()`이 돌려주는 것
 
-**§9에서 제일 중요한 인터페이스가 이거다** — A의 출력이 B/C의 입력이다.
-`recon.py`의 `run()`이 이 모양이고, 세 에이전트가 같은 모양을 돌려준다.
+**제일 중요한 인터페이스가 이거다** — A의 출력이 B/C의 입력이다.
+처음에는 그냥 dict였는데, 키 이름을 지켜주는 게 아무것도 없었다. `Finding` 하나의
+모양만 맞춰도 셋을 합칠 수 없다 — 한 명이 endpoints를 dict로, 다른 명이 튜플
+리스트로 내면 오케스트레이터가 똑같이 다룰 수 없다. 그래서 dataclass로 못박았다.
 
 ```python
-{
-    "endpoints":     [Endpoint, ...],   # 정찰만 채운다. B/C는 빈 리스트
-    "findings":      [AgentFinding, ...],
-    "coverage":      Coverage,
-    "requests_made": int,               # client.request_count
-    "blocked":       [(url, 거부사유), ...],   # 안전장치가 거부한 요청
-}
+@dataclass
+class AgentResult:
+    agent: str                       # "recon" (scanner는 f"agent:{agent}")
+    findings: list[Finding] = []
+    coverage: Coverage | None = None
+    endpoints: list[Endpoint] = []   # 정찰만 채운다. B/C는 빈 리스트
+    requests_made: int = 0
+    blocked: list[tuple[str, str]] = []   # 안전장치가 거부한 요청
+```
+
+`validate_result(r)`이 검사한다: `agent` 이름, `coverage` 존재와 `unit` 어휘,
+`coverage.findings`가 실제 개수와 맞는지, **findings의 `scanner`가 자기 에이전트
+이름인지**(남의 에이전트를 베끼고 `name`만 안 바꾼 경우가 여기서 걸린다), 그리고
+findings 각각의 §4 규칙까지.
+
+### 5-0. `Agent`를 상속한다
+
+스캐너는 `Scanner` ABC가 있어서 nuclei와 nikto를 오케스트레이터가 똑같이 다룬다.
+에이전트도 같게 만들었다. **구현할 것은 `run()` 하나다.**
+
+```python
+from dast_harness.agent_kit import Agent
+
+class IdorAgent(Agent):
+    name = "idor"            # scanner 값은 f"agent:{name}"
+    unit = "object-id"       # Coverage.unit — 뭘 세는 에이전트인가
+
+    def run(self, base: str) -> AgentResult:
+        ...
+        return self.finish(self.findings, tested=len(probed))
+```
+
+`finish()`가 `coverage`·요청 수·`blocked`를 채우고 `validate_result()`를 돌린다.
+위반이면 `AssertionError`다. **손으로 세지 마라** — `coverage.findings`를 직접
+세면 나중에 틀어진다. 안 찾아본 것은 `skipped`/`skip_reasons`로 남긴다.
+
+```python
+return self.finish(findings, tested=12, skipped=3,
+                   skip_reasons={"no-auth-session": 3})
 ```
 
 ### 5-1. 정찰은 결과가 두 종류다 (중요)
@@ -608,6 +642,23 @@ AgentFinding(
 → `confidence`, `category`, `evidence`, `agent_data`가 **조용히 사라진다.** 예외도
 안 난다. `contract.finding_to_dict()`가 우회로로 있지만 리포터 경로에 안 꽂혀
 있어서 실제 리포트에서는 여전히 증발한다.
+
+### 아직 안 된 것: 하네스에 꽂는 자리
+
+여기까지는 **에이전트 하나가 혼자 돌아가는 것**까지다. `cli.py` / `orchestrator.py` /
+`validate.py`에는 `agent`라는 문자열이 아직 하나도 없다 — 에이전트는
+`python3 -m dast_harness.agent_kit.recon`으로만 돌고, 스캐너처럼 `-s recon`으로
+꽂을 자리가 없다.
+
+`AgentResult`가 그 자리에 넣을 물건의 모양이다. 셋이 같은 모양을 내기 시작하면
+오케스트레이터에 붙이는 건 기계적인 작업이 된다. 반대로 이걸 안 정하고 셋이 각자
+만들면, 마지막에 세 번 고쳐야 한다.
+
+같이 남은 것 두 개:
+
+- `validate.py`가 에이전트 findings를 채점하지 못한다 (스캐너만 돌린다). 정답지에
+  `idor`/`injection` 항목은 넣었지만 크레딧을 줄 경로가 없다
+- `must_not_detect`(`/lookup` 오탐 함정)도 `score()`에 안 물려 있다
 
 ### 파일 이름 주의
 
