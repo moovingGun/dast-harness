@@ -20,6 +20,7 @@ from dast_harness.agent_kit.contract import (MASKED, MAX_EXCERPT,
                                              ReconResult, RequestParameter,
                                              RequestSeed, finding_to_dict,
                                              validate_finding, validate_result)
+from dast_harness.agent_kit import recon
 from dast_harness.agent_kit.recon import ReconAgent
 
 
@@ -544,7 +545,7 @@ class RequestSeedTest(unittest.TestCase):
     def test_relative_url_is_rejected(self):
         # A seed is meant to be sendable as-is; a bare path is not.
         errs = self._seed_errors(self._seed(url="/api/orders/1001"))
-        self.assertTrue(any("절대 URL" in e for e in errs), errs)
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
 
     def test_location_outside_vocabulary_is_rejected(self):
         errs = self._seed_errors(self._seed(
@@ -573,6 +574,161 @@ class RequestSeedTest(unittest.TestCase):
         errs = self._seed_errors(self._seed(
             params=(RequestParameter(name="", location="query"),)))
         self.assertTrue(any("이름 없는" in e for e in errs), errs)
+
+
+class SeedRegressionTest(unittest.TestCase):
+    """Defects found reviewing the RequestSeed change. Each one shipped a wrong
+    request to whoever replays the seed, so each gets a repro."""
+
+    def _template(self, path, path_params):
+        return RequestSeed(
+            method="GET", url="http://127.0.0.1:8080" + path,
+            params=tuple(RequestParameter(name=n, location="path", value=v,
+                                          type="int")
+                         for n, v in path_params),
+        ).template
+
+    def test_value_inside_another_segment_is_not_substituted(self):
+        # str.replace turned this into "/api/v{id}/users/{id}": the API version
+        # became a placeholder, so two ids produced two different templates and
+        # the seed list drowned in values — the exact thing template prevents.
+        self.assertEqual(self._template("/api/v2/users/2", [("id", "2")]),
+                         "/api/v2/users/{id}")
+
+    def test_shorter_id_is_not_substituted_inside_a_longer_one(self):
+        self.assertEqual(self._template("/api/1/items/11",
+                                        [("id1", "1"), ("id2", "11")]),
+                         "/api/{id1}/items/{id2}")
+
+    def test_repeated_value_consumes_one_placeholder_each(self):
+        self.assertEqual(self._template("/files/1/1", [("id1", "1"), ("id2", "1")]),
+                         "/files/{id1}/{id2}")
+        self.assertEqual(self._template("/orders/2/items/2",
+                                        [("id1", "2"), ("id2", "2")]),
+                         "/orders/{id1}/items/{id2}")
+
+    def test_merged_seed_keeps_url_and_path_params_together(self):
+        # Merging took the newer path value but kept the older url, inventing a
+        # request that was never sent (url .../1001 carrying id=7).
+        agent = ReconAgent(FakeClient({}))
+        for value in ("1001", "7"):
+            agent._add(RequestSeed(
+                method="GET", url=f"http://127.0.0.1:8080/api/orders/{value}",
+                params=(RequestParameter(name="id", location="path",
+                                         value=value, type="int"),),
+                observed_status=200))
+        seed = next(iter(agent.seeds.values()))
+        path_value = next(p.value for p in seed.params if p.location == "path")
+        self.assertIn(path_value, seed.url)
+        # ...and the seed still matches the key it is stored under.
+        self.assertEqual(("GET", seed.template), next(iter(agent.seeds)))
+
+    def test_quoted_attribute_value_keeps_its_spaces(self):
+        # ATTR stopped at the first space, so the injection baseline was wrong.
+        self.assertEqual(
+            recon._attrs('name="title" value="hello world"'),
+            {"name": "title", "value": "hello world"})
+
+    def test_key_value_text_inside_an_attribute_is_not_an_attribute(self):
+        # 'placeholder="e.g. name=foo"' renamed the parameter to foo, and
+        # 'placeholder="hint: type=submit"' made a password field look like a
+        # submit button, silently dropping it from the seed.
+        self.assertEqual(
+            recon._attrs('name="q" placeholder="e.g. name=foo"'),
+            {"name": "q", "placeholder": "e.g. name=foo"})
+        self.assertEqual(
+            recon._attrs('name="password" type="password" '
+                         'placeholder="hint: type=submit"')["type"],
+            "password")
+
+    def test_entities_in_attribute_values_are_decoded(self):
+        self.assertEqual(recon._attrs('action="/s?a=1&amp;b=2"')["action"],
+                         "/s?a=1&b=2")
+
+    def test_form_tag_survives_a_gt_inside_an_attribute(self):
+        # The attr chunk was cut at the '>' in onsubmit, so method/action were
+        # never read: the POST endpoint vanished and the current page got a
+        # phantom query parameter instead.
+        agent = ReconAgent(FakeClient({}))
+        agent._record_forms(
+            "http://t.invalid/checkout",
+            '<form onsubmit="return a>b" method="post" action="/pay">'
+            '<input name="amount" value="10"></form>')
+        self.assertEqual(list(agent.seeds), [("POST", "/pay")])
+        seed = agent.seeds[("POST", "/pay")]
+        self.assertEqual([(p.name, p.location) for p in seed.params],
+                         [("amount", "body")])
+
+
+class SeedValidationTest(unittest.TestCase):
+    """`validate_result` let several unsendable seeds through."""
+
+    def _errors(self, **kw):
+        seed = RequestSeed(**{**dict(method="GET",
+                                     url="http://127.0.0.1:8080/x"), **kw})
+        return validate_result(ReconResult(
+            agent="recon",
+            coverage=Coverage(unit="endpoint", tested=1, findings=0),
+            completion=AgentCompletion(), request_seeds=[seed]))
+
+    def test_non_http_scheme_is_rejected(self):
+        # Only `.scheme` was checked, so javascript: URLs passed.
+        errs = self._errors(url="javascript:alert(1)")
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
+
+    def test_url_without_a_host_is_rejected(self):
+        errs = self._errors(url="http:///no-host")
+        self.assertTrue(any("http(s)" in e for e in errs), errs)
+
+    def test_empty_method_is_rejected(self):
+        errs = self._errors(method="")
+        self.assertTrue(any("method" in e for e in errs), errs)
+
+    def test_path_param_absent_from_the_url_is_rejected(self):
+        errs = self._errors(
+            url="http://127.0.0.1:8080/api/orders/1001",
+            params=(RequestParameter(name="id", location="path", value="7"),))
+        self.assertTrue(any("url 경로에 없음" in e for e in errs), errs)
+
+    def test_non_string_value_is_rejected(self):
+        # An int value made `.template` raise TypeError downstream.
+        errs = self._errors(
+            params=(RequestParameter(name="id", location="query", value=7),))
+        self.assertTrue(any("문자열이 아님" in e for e in errs), errs)
+
+    def test_duplicate_parameter_is_rejected(self):
+        errs = self._errors(params=(
+            RequestParameter(name="q", location="query", value="a"),
+            RequestParameter(name="q", location="query", value="b")))
+        self.assertTrue(any("중복" in e for e in errs), errs)
+
+    def test_none_request_seeds_does_not_crash(self):
+        result = ReconResult(
+            agent="recon", coverage=Coverage(unit="endpoint", tested=0, findings=0),
+            completion=AgentCompletion(), request_seeds=None)
+        self.assertEqual(validate_result(result), [])   # raised TypeError before
+
+
+class ConfidenceTypeTest(unittest.TestCase):
+    """`Confidence` is a str Enum, so a bare string compares equal to it."""
+
+    def test_bare_string_confidence_is_rejected(self):
+        # It passed validation and then crashed to_dict() on `.value`.
+        f = _agent_finding(confidence="firm")
+        errs = validate_finding(f)
+        self.assertTrue(any("Confidence enum" in e for e in errs), errs)
+
+    def test_enum_confidence_is_accepted(self):
+        self.assertEqual(validate_finding(_agent_finding(
+            confidence=Confidence.FIRM)), [])
+
+    def test_rejected_confidence_never_reaches_serialization(self):
+        # The contract check has to fire before to_dict() is ever called.
+        result = AgentResult(
+            agent="idor", findings=[_agent_finding(confidence="firm")],
+            coverage=Coverage(unit="object-id", tested=1, findings=1),
+            completion=AgentCompletion())
+        self.assertTrue(validate_result(result))
 
 
 class ReconSkeletonTest(unittest.TestCase):

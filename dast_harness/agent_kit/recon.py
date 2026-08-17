@@ -14,6 +14,7 @@ IDOR/injection 에이전트를 명세만 보고 처음부터 짜지 말 것. 세
 
 from __future__ import annotations
 
+import html
 import re
 import sys
 from collections import deque
@@ -27,9 +28,20 @@ from .contract import (AgentFinding, Confidence, Evidence, Probe,
 from .http import AgentHttpClient
 
 HREF = re.compile(r"""(?:href|src|action)\s*=\s*["']([^"'>\s]+)""", re.I)
-FORM = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.I | re.S)
-FIELD = re.compile(r"<(?:input|select|textarea)\b([^>]*)>", re.I)
-ATTR = re.compile(r"""([\w-]+)\s*=\s*["']?([^"'>\s]*)""")
+
+# 태그 여는 부분: 따옴표 안의 `>`는 태그 끝이 아니다.
+# `<form onsubmit="return a>b" method="post">`에서 `[^>]*`를 쓰면 onsubmit 안의
+# `>`에서 끊겨 method/action을 못 읽고, GET + 현재 페이지로 잘못 폴백한다.
+_TAG_ATTRS = r"""((?:[^>"']|"[^"]*"|'[^']*')*)"""
+
+FORM = re.compile(rf"<form\b{_TAG_ATTRS}>(.*?)</form>", re.I | re.S)
+FIELD = re.compile(rf"<(?:input|select|textarea)\b{_TAG_ATTRS}>", re.I)
+
+# 속성 하나. 따옴표로 감싼 값은 **통째로** 먹는다 — 값 안의 공백에서 멈추면
+# 그 뒤를 다시 스캔해서 유령 속성을 만든다. `placeholder="hint: type=submit"`이
+# type=submit으로 읽혀 비밀번호 필드가 조용히 사라지는 사고가 났다.
+ATTR = re.compile(r"""([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))""")
+
 NUMERIC_SEG = re.compile(r"^\d+$")
 
 # 값이 아니라 데이터가 아닌 컨트롤. 주입 대상이 아니다.
@@ -41,7 +53,11 @@ FIELD_TYPES = {"number": "int", "range": "int", "checkbox": "bool"}
 
 
 def _attrs(chunk: str) -> dict[str, str]:
-    return {k.lower(): v for k, v in ATTR.findall(chunk)}
+    """태그 속성을 dict로. 값의 HTML 엔티티는 풀어준다 (`&amp;` → `&`)."""
+    return {
+        name.lower(): html.unescape(double or single or bare)
+        for name, double, single, bare in ATTR.findall(chunk)
+    }
 
 
 def _guess_type(value: str) -> str:
@@ -95,18 +111,31 @@ class ReconAgent(Agent):
         if prev is None:
             self.seeds[key] = seed
             return
-        merged = {(p.name, p.location): p for p in prev.params}
-        for p in seed.params:            # 나중에 본 쪽이 값을 갱신한다
-            merged[(p.name, p.location)] = p
+
+        # `url`과 `location="path"` 파라미터는 한 쌍이다. 따로 합치면
+        # url=/api/orders/1001 + id=7 처럼 **존재하지 않았던 요청**이 만들어지고
+        # template이 자기 키와 달라진다. 그래서 실제로 보낸 쪽을 통째로 고른다.
+        if prev.observed_status is None and seed.observed_status is not None:
+            primary, other = seed, prev
+        else:
+            primary, other = prev, seed
+
+        # 경로 밖 파라미터만 합친다. 나중에 본 쪽(seed)이 값을 갱신한다.
+        non_path = {(p.name, p.location): p
+                    for p in prev.params if p.location != "path"}
+        non_path.update({(p.name, p.location): p
+                         for p in seed.params if p.location != "path"})
+
         self.seeds[key] = replace(
-            prev,
-            params=tuple(merged.values()),
-            # 관측값은 실제로 보낸 쪽(status가 있는 쪽)을 남긴다.
-            observed_status=seed.observed_status or prev.observed_status,
-            observed_content_type=seed.observed_content_type or prev.observed_content_type,
-            auth_required=(seed.auth_required if seed.auth_required is not None
-                           else prev.auth_required),
-            body_content_type=seed.body_content_type or prev.body_content_type,
+            primary,
+            params=tuple(p for p in primary.params if p.location == "path")
+                   + tuple(non_path.values()),
+            observed_status=primary.observed_status or other.observed_status,
+            observed_content_type=(primary.observed_content_type
+                                   or other.observed_content_type),
+            auth_required=(primary.auth_required if primary.auth_required is not None
+                           else other.auth_required),
+            body_content_type=primary.body_content_type or other.body_content_type,
         )
 
     def _record(self, ex, source: str) -> None:
@@ -128,7 +157,7 @@ class ReconAgent(Agent):
             source=source,
         ))
 
-    def _record_forms(self, page_url: str, html: str) -> None:
+    def _record_forms(self, page_url: str, page_html: str) -> None:
         """폼에서 씨앗을 만든다. **injection 팀이 POST 파라미터를 받는 경로다.**
 
         크롤러는 `action` 속성만 보고 `<input name=...>`은 버리고 있었다. 그래서
@@ -138,7 +167,7 @@ class ReconAgent(Agent):
         폼은 **보내지 않는다.** 상태를 바꾸는 POST를 정찰이 눌러볼 수는 없으므로
         `observed_status`는 비운다 — "모양은 찾았고 아직 안 보냈다"는 뜻이다.
         """
-        for raw_attrs, body in FORM.findall(html):
+        for raw_attrs, body in FORM.findall(page_html):
             attrs = _attrs(raw_attrs)
             method = attrs.get("method", "GET").upper()
             action = self.client.resolve(page_url, attrs.get("action") or page_url)

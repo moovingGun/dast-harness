@@ -190,12 +190,24 @@ class RequestSeed:
 
         같은 엔드포인트의 씨앗을 하나로 묶는 키다. 이게 없으면 id마다 씨앗이
         하나씩 생겨서 목록이 값으로 뒤덮인다.
+
+        **세그먼트 단위로 바꾼다.** 문자열 치환을 쓰면 값이 다른 세그먼트의
+        부분문자열일 때 망가진다 — `/api/v2/users/2`에서 `"2"`를 치환하면
+        `/api/v{id}/users/{id}`가 되어 버전 번호까지 자리표시자가 된다.
         """
         path = urlparse(self.url).path or "/"
-        for p in self.params:
-            if p.location == "path" and p.value:
-                path = path.replace(p.value, "{%s}" % p.name)
-        return path
+        pending = [p for p in self.params
+                   if p.location == "path" and str(p.value)]
+        out = []
+        for segment in path.split("/"):
+            # 아직 안 쓰인 경로 파라미터 중 이 세그먼트와 **정확히** 같은 것.
+            match = next((p for p in pending if str(p.value) == segment), None)
+            if match is None:
+                out.append(segment)
+            else:
+                pending.remove(match)
+                out.append("{%s}" % match.name)
+        return "/".join(out)
 
 
 @dataclass
@@ -272,11 +284,27 @@ def _seed_errors(seeds) -> list[str]:
     """요청 씨앗 검사. 씨앗은 B/C가 **그대로 재생**하는 물건이라 모양이 어긋나면
     받는 쪽에서 조용히 잘못된 요청을 보낸다."""
     errs: list[str] = []
-    for i, s in enumerate(seeds):
-        if not urlparse(s.url).scheme:
-            errs.append(f"request_seeds[{i}]: url이 절대 URL이 아님 ({s.url!r})")
+    for i, s in enumerate(seeds or ()):
+        where_seed = f"request_seeds[{i}]"
+
+        if not s.method:
+            errs.append(f"{where_seed}: method가 비어 있음")
+
+        parsed = urlparse(s.url)
+        # scheme만 보면 'javascript:alert(1)'이 통과한다. 씨앗은 그대로 전송되므로
+        # http(s) + 호스트가 있는지까지 봐야 한다.
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            errs.append(f"{where_seed}: 전송 가능한 http(s) URL이 아님 ({s.url!r})")
+
+        segments = set((parsed.path or "/").split("/"))
+        seen: set[tuple[str, str]] = set()
         for p in s.params:
-            where = f"request_seeds[{i}] 파라미터 {p.name!r}"
+            where = f"{where_seed} 파라미터 {p.name!r}"
+            if not p.name:
+                errs.append(f"{where_seed}: 이름 없는 파라미터")
+            if not isinstance(p.value, str):
+                # 문자열이 아니면 template이 TypeError로 터진다.
+                errs.append(f"{where}: value가 문자열이 아님 ({p.value!r})")
             if p.location not in PARAM_LOCATIONS:
                 errs.append(
                     f"{where}: location이 어휘 밖: {p.location!r} "
@@ -289,8 +317,16 @@ def _seed_errors(seeds) -> list[str]:
                 )
             if p.json_path and p.location != "body":
                 errs.append(f"{where}: json_path는 location='body'에서만 쓴다")
-            if not p.name:
-                errs.append(f"request_seeds[{i}]: 이름 없는 파라미터")
+            # 경로 파라미터는 url의 세그먼트여야 한다. 어긋나면 url과 params가
+            # 서로 다른 요청을 가리키고, template도 틀어진다.
+            if (p.location == "path" and isinstance(p.value, str) and p.value
+                    and p.value not in segments):
+                errs.append(
+                    f"{where}: 경로 파라미터 값 {p.value!r}이 url 경로에 없음 ({s.url!r})"
+                )
+            if (p.name, p.location) in seen:
+                errs.append(f"{where}: 같은 (name, location)이 중복됨")
+            seen.add((p.name, p.location))
     return errs
 
 
@@ -362,6 +398,15 @@ def validate_finding(f: Finding) -> list[str]:
 
     conf = getattr(f, "confidence", Confidence.CONFIRMED)
     ev = getattr(f, "evidence", None)
+
+    # Confidence는 str Enum이라 "firm" == Confidence.FIRM이 True다. 그래서 문자열을
+    # 넣어도 비교는 통과하지만 직렬화가 `.value`에서 터진다. 여기서 잡는다.
+    if not isinstance(conf, Confidence):
+        errs.append(
+            f"confidence는 Confidence enum이어야 한다 (받은 값: {conf!r}). "
+            f"Confidence.FIRM처럼 쓸 것"
+        )
+        conf = Confidence.CONFIRMED
 
     # --- 규칙 2
     if conf is not Confidence.CONFIRMED and ev is None:
