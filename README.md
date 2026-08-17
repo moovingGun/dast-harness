@@ -4,9 +4,51 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 
-여러 스캐너를 같은 인터페이스 뒤에 꽂는 최소 DAST 하네스 (현재 nuclei, nikto).
+여러 스캐너와 에이전트를 **같은 인터페이스 뒤에 꽂는** 최소 DAST 하네스.
 스캔을 실행하고 상태·결과를 조회하며, **loopback 또는 명시적으로 허가된 대상만**
-스캔하도록 안전장치를 강제한다.
+스캔하도록 안전장치를 강제한다. 런타임 의존성 없음 (stdlib only).
+
+두 부분으로 되어 있다.
+
+| | 무엇 | 어디 |
+|---|---|---|
+| **스캐너 하네스** | nuclei·nikto 같은 기성 도구를 실행하고 결과를 `Finding`으로 정규화 | `dast_harness/scanners/`, `runner.py`, `orchestrator.py` |
+| **에이전트 키트** | 직접 만드는 정찰·injection·IDOR 에이전트가 **같은 모양의 결과**를 내게 하는 계약과 도구 | `dast_harness/agent_kit/` |
+
+둘 다 같은 `Finding`을 내고 같은 리포터를 통과한다. 그래서 스캐너 결과와 에이전트
+결과를 한 리포트에서 볼 수 있다.
+
+## 처음 보는 사람은 여기서부터
+
+```bash
+python3 -m unittest discover -s tests            # 1) 도커·스캐너 없이 전부 통과하는지
+python3 targets/vulnerable_app/app.py &          # 2) 통제 취약 타겟 (127.0.0.1:8080)
+python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하는 에이전트
+```
+
+3번 출력이 이 프로젝트가 무엇을 주고받는지 가장 빠르게 보여준다.
+
+**에이전트를 만들러 왔다면 → [AGENT_GUIDE.md](AGENT_GUIDE.md)** 하나만 읽으면 된다.
+아래 "팀원이 봐야 할 것"에 순서가 있다.
+
+## 구현 상태
+
+| | 기능 |
+|---|---|
+| ✅ | nuclei / nikto 어댑터 (실행·파싱·`Finding` 정규화) |
+| ✅ | 다중 스캐너 병렬 실행, 상태 롤업, 중단·타임아웃, 완료 증거 |
+| ✅ | 안전장치 — loopback/allowlist 강제, 리다이렉트 차단 |
+| ✅ | console / json 리포터 |
+| ✅ | 통제 취약 타겟 + 정답지, 스캐너 탐지 정확도 채점 |
+| ✅ | **에이전트 결과 계약** — `AgentFinding`/`AgentResult`/`RequestSeed` + 검증기 |
+| ✅ | **정찰 에이전트** — 크롤 + 폼 파싱 → 요청 씨앗 인벤토리 |
+| ⬜ | injection 에이전트 ← 팀원 작업 |
+| ⬜ | IDOR 에이전트 ← 팀원 작업 |
+| 🔶 | 리포터에 에이전트 필드(`confidence`/`evidence`) 반영 — 별도 PR 진행 중 |
+| ⬜ | 에이전트를 CLI·오케스트레이터에 꽂는 배관 |
+| ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
+
+테스트 247개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -38,38 +80,83 @@ dast-harness scan http://127.0.0.1:8080 \
 | `124` | 그룹 timeout |
 | `130` | 사용자 중단(Ctrl-C) |
 
-## 에이전트를 만든다면
+## 폴더 구조
 
-정찰 / injection / IDOR 에이전트를 이 하네스에 붙이는 방법은
-**[AGENT_GUIDE.md](AGENT_GUIDE.md)** 에 있다. 결과 형식 계약, 동작하는 예시,
-연습용 타겟, 커밋 전 체크리스트가 전부 거기 있다.
-(`finding-v0-proposal.md`는 그 계약을 정할 때의 설계 논의 기록이다.)
-
-## 구조
+`📖` = 에이전트 만들 때 읽을 것 · `✍️` = 새 에이전트가 추가되는 곳 · `🔒` = 수정 금지
 
 ```
 dast_harness/
-  models.py          # Target, ScanConfig, Finding, Severity, ScanStatus, ScanState
-  safety.py          # 로컬/허가 대상 검증 (스캔 전 강제 choke point)
-  scanners/base.py   # Scanner 추상 인터페이스
-  scanners/nuclei.py # nuclei 실행 + JSONL 스트리밍 파싱 → Finding 정규화
-  scanners/nikto.py  # nikto 실행 + 종료 후 JSON 파일 파싱 → Finding 정규화
-  runner.py          # 단일 스캐너: start_scan / get_status / get_results / stop_scan / wait
-  orchestrator.py    # MultiScanRunner: 여러 스캐너 병렬 실행 + 롤업/병합
-  cli.py             # argparse 기반 one-shot CLI (python -m dast_harness scan)
-  validate.py        # ground truth 대비 탐지 정확도 채점 (python -m dast_harness.validate)
-  reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
-  reporters/json_reporter.py     # findings → JSON 문자열
-  reporters/console_reporter.py  # 심각도별 콘솔 요약
-targets/compose.yml            # 통제 취약 타겟 컨테이너 (127.0.0.1 전용 게시)
-targets/vulnerable_app/app.py  # 의도적으로 취약한 stdlib 앱
-targets/vulnerable_app/ground_truth.json  # 이 앱이 가진 취약점 정답지
-example.py           # 단일 스캐너 예시
-example_multi.py     # 다중 스캐너 예시
+├── models.py            공통 자료형: Target, ScanConfig, Finding, Severity,
+│                        ScanStatus, ScanState, CompletionEvidence
+├── safety.py         🔒 이 프로젝트의 유일한 안전 경계. loopback/allowlist 외 거부
+│
+├── scanners/            ── 기성 도구 어댑터 ──
+│   ├── base.py          Scanner 추상 인터페이스 (is_available / run)
+│   ├── nuclei.py        nuclei 실행 + JSONL 스트리밍 파싱 → Finding
+│   └── nikto.py         nikto 실행 + 종료 후 JSON 파싱 → Finding
+│
+├── agent_kit/           ── 직접 만드는 에이전트용 ──
+│   ├── contract.py   📖 결과 형식 계약. AgentFinding / Evidence / HttpExchange /
+│   │                    Probe / Coverage / RequestSeed / AgentResult +
+│   │                    validate_finding() / validate_result()
+│   ├── base.py       📖 Agent 추상 클래스. 상속해서 run() 하나만 구현한다
+│   ├── http.py       📖 AgentHttpClient — 에이전트가 쓸 수 있는 유일한 HTTP 통로
+│   └── recon.py      📖 동작하는 정찰 에이전트. **이걸 복사해서 시작한다**
+│      ✍️ idor.py         ← IDOR 담당자가 여기에 추가
+│      ✍️ injection.py    ← injection 담당자가 여기에 추가
+│
+├── runner.py            단일 스캐너 생명주기: start_scan/get_status/get_results/
+│                        stop_scan/wait
+├── orchestrator.py      MultiScanRunner: 여러 스캐너 병렬 실행 + 상태 롤업/결과 병합
+├── cli.py               one-shot CLI (python -m dast_harness scan)
+├── validate.py          정답지 대비 탐지 정확도 채점
+└── reporters/           출력 전용 계층 (console, json)
+
+targets/
+├── compose.yml                   통제 취약 타겟 컨테이너 (127.0.0.1 전용 게시)
+└── vulnerable_app/
+    ├── app.py                 📖 의도적으로 취약한 stdlib 앱 — 연습 대상
+    └── ground_truth.json      ✍️ 이 앱의 취약점 정답지. 새 취약점을 찾게 만들면
+                                  여기에도 항목을 추가한다
+
+tests/                           도커·스캐너 설치 없이 전부 돈다
+├── test_agent_contract.py   📖 에이전트 계약 테스트 (규칙을 실제로 강제하는 곳)
+├── test_target_app.py           취약 타겟이 문서대로 취약한지
+└── test_safety.py ...           안전장치·러너·리포터 등
+
+AGENT_GUIDE.md            📖 **에이전트 작성 가이드. 여기서 시작.**
+CLAUDE.md                 📖 저장소 작업 규칙 (사람·AI 공통)
+finding-v0-proposal.md       계약을 정할 때의 설계 논의 기록 (읽지 않아도 된다)
+example.py / example_multi.py   스캐너 사용 예시
 ```
 
 각 스캔은 완료 증거(`CompletionEvidence`: 종료코드·파싱 계정·버전·중단 여부 등)를
 스캐너별로 기록하며, `get_status`의 `evidence` 필드로 조회된다.
+
+## 팀원이 봐야 할 것
+
+정찰 / injection / IDOR 에이전트를 만든다면 이 순서로 보면 된다.
+
+1. **[AGENT_GUIDE.md](AGENT_GUIDE.md)** — 이것만 읽어도 시작할 수 있다.
+   5분 첫 실행, 뼈대, 증거 만드는 법, 동작하는 전체 예시, 커밋 전 체크리스트
+2. **`dast_harness/agent_kit/recon.py`** — 명세를 처음부터 구현하지 말고
+   **이 파일을 복사해서** 고친다. 세 에이전트의 구조가 같아야 마지막에 합쳐진다
+3. **`targets/vulnerable_app/app.py`** — 연습 대상. 계정과 취약점 목록은 가이드 8장
+4. **`dast_harness/agent_kit/contract.py`** — 필드 의미가 궁금할 때 찾아보는 곳.
+   외울 필요는 없다. 어기면 `AssertionError`가 난다
+
+작업 중 지켜야 할 것 두 개만 미리 알아두면 된다.
+
+- **HTTP는 `AgentHttpClient`로만 보낸다.** `requests`/`httpx`/`urllib`를 직접 쓰면
+  안전 경계를 우회한다 (타겟 응답을 읽고 다음 URL을 정하는 구조라서 위험하다)
+- **`safety.py`는 수정하지 않는다.** 새 도구는 우회하지 말고 통과시킨다
+
+자세한 규칙은 [CLAUDE.md](CLAUDE.md)에 있다.
+
+> **아직 안 된 것:** 에이전트를 CLI에 자동으로 꽂는 배관이 없다. `cli.py` /
+> `orchestrator.py` / `validate.py`는 아직 에이전트를 모르므로, 지금은 직접
+> import해서 실행한다. 배관이 붙는 지점은 `AgentResult`이고 그 모양은 확정됐으니
+> **에이전트 코드는 나중에 고치지 않아도 된다.**
 
 ## 스캐너 (scanners/)
 
