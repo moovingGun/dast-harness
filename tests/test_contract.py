@@ -681,5 +681,83 @@ class MultiTimeoutAtomicityTests(unittest.TestCase):
         self.assertEqual(good_scans[0]["status"], ScanStatus.STOPPED.value)
 
 
+# --------------------------------------------------------------------------
+# Ctrl-C must not orphan a scanner subprocess (wait() vs interrupted join)
+# --------------------------------------------------------------------------
+class RealSubprocScanner(Scanner):
+    """Cooperative scanner: spawns a real (grouped) child, records its pid, and
+    kills its process group when asked to stop."""
+
+    name = "realsub"
+
+    def __init__(self, pidfile):
+        self.pidfile = pidfile
+
+    def is_available(self):
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        from dast_harness.scanners.base import stop_process_group
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            start_new_session=True,
+        )
+        with open(self.pidfile, "w") as fh:
+            fh.write(str(proc.pid))
+        while proc.poll() is None:
+            if stop_event is not None and stop_event.is_set():
+                stop_process_group(proc)
+                break
+            time.sleep(0.05)
+        stopped = bool(stop_event is not None and stop_event.is_set())
+        return ScanOutcome(exit_code=proc.returncode, output_present=False,
+                          output_parseable=False, stopped=stopped)
+
+
+class CtrlCCleanupTests(unittest.TestCase):
+    def test_wait_reaps_subprocess_even_if_join_returns_early(self):
+        # On Ctrl-C, CPython can leave a thread.join() that returns immediately
+        # while the worker is still running (version/timing dependent). Simulate
+        # that failure mode deterministically: wait() must not trust the join and
+        # return early; it must block on real completion so the scanner reaps its
+        # process group instead of orphaning it.
+        with tempfile.TemporaryDirectory() as d:
+            pidfile = os.path.join(d, "p.pid")
+            runner = ScanRunner(RealSubprocScanner(pidfile))
+            sid = runner.start_scan(Target(LOCAL))
+
+            txt = ""
+            for _ in range(250):
+                try:
+                    with open(pidfile) as fh:
+                        txt = fh.read().strip()
+                    if txt:
+                        break
+                except OSError:
+                    pass
+                time.sleep(0.02)
+            pid = int(txt)
+            self.addCleanup(_force_kill, pid)
+            self.assertTrue(_alive(pid), "scanner subprocess should be running")
+
+            # A join() corrupted by an interrupted Ctrl-C: returns instantly.
+            runner._threads[sid].join = lambda timeout=None: None
+
+            runner.stop_scan(sid)
+            t0 = time.monotonic()
+            runner.wait(sid, timeout=5)
+            elapsed = time.monotonic() - t0
+
+            # wait() must have blocked on real completion, not the premature join.
+            self.assertGreater(
+                elapsed, 0.03, "wait() trusted a premature join() and returned early"
+            )
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and _alive(pid):
+                time.sleep(0.02)
+            self.assertFalse(_alive(pid), "scanner subprocess orphaned after Ctrl-C")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,32 @@ class ScanRunner:
     def _run(
         self, state: ScanState, config: ScanConfig, stop_event: threading.Event
     ) -> None:
+        try:
+            self._execute(state, config, stop_event)
+        except Exception as exc:  # noqa: BLE001 - post-processing must not hang wait()
+            # A misbehaving Scanner (e.g. one returning a non-ScanOutcome) can
+            # make the post-run steps raise. Record a terminal FAILED status so
+            # the scan is never left RUNNING and the error stays observable.
+            self._mark_post_processing_failure(state, config, exc)
+        finally:
+            # Final safety net: if nothing above reached a terminal status — a
+            # BaseException such as SystemExit slipped past `except Exception`, or
+            # the failure handler itself raised — force FAILED so no scan is left
+            # RUNNING. Then always release wait(), which blocks on this Event and
+            # would otherwise deadlock.
+            if state.is_active():
+                try:
+                    state.mark_finished(
+                        ScanStatus.FAILED, time.time(), exit_code=None,
+                        error="scan ended without a terminal status",
+                    )
+                except Exception:  # noqa: BLE001 - last resort, must not block done
+                    pass
+            state.done.set()
+
+    def _execute(
+        self, state: ScanState, config: ScanConfig, stop_event: threading.Event
+    ) -> None:
         state.mark_running(time.time())
         started_at = state.started_at
         run_error: str | None = None
@@ -136,6 +162,41 @@ class ScanRunner:
             error=evidence_error if status == ScanStatus.FAILED else None,
         )
 
+    def _mark_post_processing_failure(
+        self,
+        state: ScanState,
+        config: ScanConfig,
+        exc: Exception,
+    ) -> None:
+        error = f"scan post-processing failed: {exc!r}"
+        # FAILED is terminal, so mark_finished honours its contract and cannot
+        # raise here; do it first so the status is never stuck on RUNNING.
+        state.mark_finished(ScanStatus.FAILED, time.time(), exit_code=None,
+                            error=error)
+        try:
+            state.record_evidence(
+                CompletionEvidence(
+                    scanner=self.scanner.name,
+                    scanner_version=None,
+                    started_at=state.started_at,
+                    finished_at=time.time(),
+                    exit_code=None,
+                    stop_requested=state.stop_requested,
+                    stop_effective=False,
+                    output_present=False,
+                    output_parseable=False,
+                    parsed_records=0,
+                    invalid_records=0,
+                    warnings_count=len(state.warnings()),
+                    findings_count=len(state.findings()),
+                    config=config.snapshot(),
+                    template_version=None,
+                    error=error,
+                )
+            )
+        except Exception:  # noqa: BLE001 - evidence is best-effort, never re-block
+            pass
+
     def _get(self, scan_id: str) -> ScanState:
         with self._lock:
             if scan_id not in self._scans:
@@ -162,10 +223,9 @@ class ScanRunner:
             event.set()
 
     def wait(self, scan_id: str, timeout: float | None = None) -> dict:
-        with self._lock:
-            thread = self._threads.get(scan_id)
-        if thread is not None:
-            thread.join(timeout)
+        # Wait on the completion Event, not thread.join(): an interrupted join
+        # can report a still-running thread as done and skip the grace period.
+        self._get(scan_id).done.wait(timeout)
         return self.get_status(scan_id)
 
     def list_scans(self) -> list[dict]:

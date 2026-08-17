@@ -151,6 +151,9 @@ class ScanState:
     authorization_reason: str = ""
     stop_requested: bool = False
     evidence: "CompletionEvidence | None" = None
+    # Set when _run finishes. wait() blocks on this instead of thread.join(),
+    # which a KeyboardInterrupt can corrupt into returning early.
+    done: threading.Event = field(default_factory=threading.Event, repr=False)
     _findings: list[Finding] = field(default_factory=list)
     _warnings: list[str] = field(default_factory=list)
     _warnings_total: int = 0

@@ -123,5 +123,55 @@ class ScanRunnerTests(unittest.TestCase):
         )
 
 
+class MalformedOutcomeScanner(Scanner):
+    """A misbehaving third-party scanner: run() returns a non-ScanOutcome value,
+    which makes _run's post-processing raise (e.g. outcome.stopped)."""
+
+    name = "malformed"
+
+    def is_available(self) -> bool:
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        return "not a ScanOutcome"
+
+
+class SysExitScanner(Scanner):
+    """run() raises a BaseException (SystemExit) that `except Exception` misses."""
+
+    name = "sysexit"
+
+    def is_available(self) -> bool:
+        return True
+
+    def run(self, target, config, on_finding, stop_event=None, on_warning=None):
+        import sys
+
+        sys.exit(3)
+
+
+class RunPostProcessingTests(unittest.TestCase):
+    def test_malformed_outcome_does_not_hang_wait(self) -> None:
+        runner = ScanRunner(MalformedOutcomeScanner())
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+
+        # Finite timeout: a regression must fail here, not hang CI forever.
+        status = runner.wait(scan_id, timeout=5)
+
+        self.assertTrue(runner._get(scan_id).done.is_set())
+        self.assertEqual(status["status"], ScanStatus.FAILED.value)
+        self.assertTrue(status["error"])  # the failure is observable, not swallowed
+
+    def test_baseexception_still_reaches_terminal_status(self) -> None:
+        runner = ScanRunner(SysExitScanner())
+        scan_id = runner.start_scan(Target("http://127.0.0.1"))
+
+        status = runner.wait(scan_id, timeout=5)
+
+        self.assertTrue(runner._get(scan_id).done.is_set())
+        self.assertEqual(status["status"], ScanStatus.FAILED.value)
+        self.assertTrue(status["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
