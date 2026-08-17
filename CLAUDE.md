@@ -84,7 +84,8 @@ dast_harness/
   models.py          # Target, ScanConfig, Finding, Severity, ScanStatus
   safety.py          # 대상 인증 — 수정 금지
   scanners/          # nuclei, nikto 어댑터
-  agent_kit/         # 에이전트용: contract.py(계약) http.py(HTTP) recon.py(골격)
+  agent_kit/         # 에이전트용: base.py(Agent 상속) contract.py(계약)
+                     #             http.py(HTTP) recon.py(복사할 골격)
   runner.py          # 단일 스캐너 생명주기
   orchestrator.py    # 다중 스캐너 병렬 + 롤업
   reporters/         # console, json
@@ -100,8 +101,12 @@ python3 targets/vulnerable_app/app.py &      # 127.0.0.1:8080
 python3 -m dast_harness.validate             # 실제 도구로 탐지율 측정
 ```
 
-새 에이전트를 추가하면 **정답지(`ground_truth.json`)에도 항목을 추가**한다.
-정답지에 없으면 잘 만들었는지 잴 방법이 없다.
+에이전트마다 테스트를 하나 만든다 — `tests/test_recon.py`를 복사해서 고치면 된다
+(`tests/agent_fakes.py`의 `FakeClient`로 서버 없이 돈다).
+
+**정답지에 없는 새 취약점**을 찾게 만들었으면 `ground_truth.json`에 항목을
+추가한다(`severity` 포함). 정답지에 없으면 잘 만들었는지 잴 방법이 없다.
+`idor`/`injection`/`user-enumeration`은 이미 있으니 중복 추가하지 말 것.
 
 ## 리뷰
 

@@ -48,7 +48,7 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ⬜ | 에이전트를 CLI·오케스트레이터에 꽂는 배관 |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 254개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 255개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -120,11 +120,14 @@ targets/
                                   여기에도 항목을 추가한다
 
 tests/                           도커·스캐너 설치 없이 전부 돈다
+├── agent_fakes.py           📖 FakeClient — 서버 없이 에이전트를 테스트한다
+├── test_recon.py            ✍️ 에이전트별 테스트의 본. 복사해서 고친다
 ├── test_agent_contract.py   📖 에이전트 계약 테스트 (규칙을 실제로 강제하는 곳)
 ├── test_target_app.py           취약 타겟이 문서대로 취약한지
 └── test_safety.py ...           안전장치·러너·리포터 등
 
 AGENT_GUIDE.md            📖 **에이전트 작성 가이드. 여기서 시작.**
+AGENTS.md                 📖 AI 도구용 진입점 (위 문서들을 가리키는 짧은 포인터)
 CLAUDE.md                 📖 저장소 작업 규칙 (사람·AI 공통)
 finding-v0-proposal.md       계약을 정할 때의 설계 논의 기록 (읽지 않아도 된다)
 example.py / example_multi.py   스캐너 사용 예시
@@ -144,6 +147,7 @@ example.py / example_multi.py   스캐너 사용 예시
 3. **`targets/vulnerable_app/app.py`** — 연습 대상. 계정과 취약점 목록은 가이드 8장
 4. **`dast_harness/agent_kit/contract.py`** — 필드 의미가 궁금할 때 찾아보는 곳.
    외울 필요는 없다. 어기면 `AssertionError`가 난다
+5. **`tests/test_recon.py`** — 네 에이전트 테스트의 본. 복사해서 고친다
 
 작업 중 지켜야 할 것 두 개만 미리 알아두면 된다.
 

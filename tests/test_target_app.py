@@ -21,6 +21,13 @@ sys.path.insert(0, os.path.join(ROOT, "targets"))
 
 from vulnerable_app import app as vulnapp  # noqa: E402
 
+from dast_harness.models import Severity  # noqa: E402
+
+
+def vulnapp_severity(value):
+    """Round-trip a ground-truth severity string through the Severity enum."""
+    return Severity.from_str(value).value
+
 TARGET_DIR = os.path.join(ROOT, "targets", "vulnerable_app")
 GROUND_TRUTH = os.path.join(TARGET_DIR, "ground_truth.json")
 
@@ -91,6 +98,15 @@ class VulnerableAppTest(ServedAppCase):
                 self.assertTrue(entry["path"].startswith("/"))
                 self.assertTrue(entry["match_any"])
                 self.assertTrue(all(m == m.lower() for m in entry["match_any"]))
+
+    def test_expected_entries_declare_a_valid_severity(self):
+        # Agents copy severity from here, so a missing or bogus value makes
+        # every agent guess (AGENT_GUIDE.md §4 has the rubric).
+        for entry in self.truth["expected"]:
+            with self.subTest(id=entry["id"]):
+                self.assertIn("severity", entry)
+                self.assertEqual(vulnapp_severity(entry["severity"]),
+                                 entry["severity"])
 
     def test_every_documented_weakness_is_actually_served(self):
         # must_not_detect entries are held to the same bar: a negative control

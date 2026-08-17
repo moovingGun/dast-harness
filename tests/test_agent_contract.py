@@ -20,8 +20,9 @@ from dast_harness.agent_kit.contract import (MASKED, MAX_EXCERPT,
                                              ReconResult, RequestParameter,
                                              RequestSeed, finding_to_dict,
                                              validate_finding, validate_result)
-from dast_harness.agent_kit import recon
 from dast_harness.agent_kit.recon import ReconAgent
+
+from tests.agent_fakes import ORIGIN, FakeClient
 
 
 def _probe(**kw):
@@ -105,14 +106,15 @@ class ProposalExamplesTest(unittest.TestCase):
             finding_id="sqli-error-based-search-q",
             name="검색 파라미터 q에 SQL 구문 주입 가능",
             severity=Severity.CRITICAL,
-            confidence=Confidence.FIRM,
+            confidence=Confidence.CONFIRMED,
             category="injection",
             matched_at="http://127.0.0.1:8080/search?q=",
             tags=["sqli", "injection", "error-based"],
             evidence=Evidence(
                 baseline_index=0,
                 rationale=("따옴표 하나로 500 + 구문 오류, 주석(--)을 붙이면 200으로 "
-                           "복구된다. CONFIRMED가 아닌 이유: 데이터 추출 미시도."),
+                           "복구된다. 결정적 증거다. 데이터 추출은 미시도이며 "
+                           "withheld에 남긴다 — 자제는 confidence를 낮추지 않는다."),
                 exchanges=[
                     HttpExchange(method="GET", url="http://127.0.0.1:8080/search?q=invoice",
                                  actor="anon", status=200, note="기준선: 정상 입력"),
@@ -361,31 +363,6 @@ class SerializationTest(unittest.TestCase):
         self.assertEqual(out["skip_reasons"], {"no-auth-session": 1})
 
 
-class FakeClient:
-    """A stand-in for AgentHttpClient: enough for ReconAgent, no sockets.
-
-    Only what an agent is allowed to touch — get/resolve/request_count/blocked.
-    """
-
-    def __init__(self, pages):
-        self.pages = pages                 # url -> (status, content_type, body)
-        self.request_count = 0
-        self.blocked = []
-
-    def get(self, url, **kw):
-        self.request_count += 1
-        status, content_type, body = self.pages.get(url, (404, "text/plain", ""))
-        return HttpExchange(method="GET", url=url, status=status,
-                            actor=kw.get("actor", "anon"),
-                            response_headers={"Content-Type": content_type},
-                            response_excerpt=body, note=kw.get("note", ""))
-
-    def resolve(self, base, href):
-        if href.startswith("http"):
-            return href if href.startswith("http://t.invalid") else None
-        return "http://t.invalid" + (href if href.startswith("/") else "/" + href)
-
-
 class AgentResultTest(unittest.TestCase):
     """The per-agent return value, not just the per-finding shape.
 
@@ -576,9 +553,9 @@ class RequestSeedTest(unittest.TestCase):
         self.assertTrue(any("이름 없는" in e for e in errs), errs)
 
 
-class SeedRegressionTest(unittest.TestCase):
-    """Defects found reviewing the RequestSeed change. Each one shipped a wrong
-    request to whoever replays the seed, so each gets a repro."""
+class SeedTemplateTest(unittest.TestCase):
+    """`template` groups seeds. Blind str.replace corrupted it, and it is the
+    key the whole inventory is keyed by."""
 
     def _template(self, path, path_params):
         return RequestSeed(
@@ -606,58 +583,6 @@ class SeedRegressionTest(unittest.TestCase):
         self.assertEqual(self._template("/orders/2/items/2",
                                         [("id1", "2"), ("id2", "2")]),
                          "/orders/{id1}/items/{id2}")
-
-    def test_merged_seed_keeps_url_and_path_params_together(self):
-        # Merging took the newer path value but kept the older url, inventing a
-        # request that was never sent (url .../1001 carrying id=7).
-        agent = ReconAgent(FakeClient({}))
-        for value in ("1001", "7"):
-            agent._add(RequestSeed(
-                method="GET", url=f"http://127.0.0.1:8080/api/orders/{value}",
-                params=(RequestParameter(name="id", location="path",
-                                         value=value, type="int"),),
-                observed_status=200))
-        seed = next(iter(agent.seeds.values()))
-        path_value = next(p.value for p in seed.params if p.location == "path")
-        self.assertIn(path_value, seed.url)
-        # ...and the seed still matches the key it is stored under.
-        self.assertEqual(("GET", seed.template), next(iter(agent.seeds)))
-
-    def test_quoted_attribute_value_keeps_its_spaces(self):
-        # ATTR stopped at the first space, so the injection baseline was wrong.
-        self.assertEqual(
-            recon._attrs('name="title" value="hello world"'),
-            {"name": "title", "value": "hello world"})
-
-    def test_key_value_text_inside_an_attribute_is_not_an_attribute(self):
-        # 'placeholder="e.g. name=foo"' renamed the parameter to foo, and
-        # 'placeholder="hint: type=submit"' made a password field look like a
-        # submit button, silently dropping it from the seed.
-        self.assertEqual(
-            recon._attrs('name="q" placeholder="e.g. name=foo"'),
-            {"name": "q", "placeholder": "e.g. name=foo"})
-        self.assertEqual(
-            recon._attrs('name="password" type="password" '
-                         'placeholder="hint: type=submit"')["type"],
-            "password")
-
-    def test_entities_in_attribute_values_are_decoded(self):
-        self.assertEqual(recon._attrs('action="/s?a=1&amp;b=2"')["action"],
-                         "/s?a=1&b=2")
-
-    def test_form_tag_survives_a_gt_inside_an_attribute(self):
-        # The attr chunk was cut at the '>' in onsubmit, so method/action were
-        # never read: the POST endpoint vanished and the current page got a
-        # phantom query parameter instead.
-        agent = ReconAgent(FakeClient({}))
-        agent._record_forms(
-            "http://t.invalid/checkout",
-            '<form onsubmit="return a>b" method="post" action="/pay">'
-            '<input name="amount" value="10"></form>')
-        self.assertEqual(list(agent.seeds), [("POST", "/pay")])
-        seed = agent.seeds[("POST", "/pay")]
-        self.assertEqual([(p.name, p.location) for p in seed.params],
-                         [("amount", "body")])
 
 
 class SeedValidationTest(unittest.TestCase):
@@ -729,100 +654,6 @@ class ConfidenceTypeTest(unittest.TestCase):
             coverage=Coverage(unit="object-id", tested=1, findings=1),
             completion=AgentCompletion())
         self.assertTrue(validate_result(result))
-
-
-class ReconSkeletonTest(unittest.TestCase):
-    """recon.py is the file the other two agents get copied from.
-
-    If the skeleton drifts from the contract, both copies inherit the drift, so
-    it is pinned here. Runs against a fake client: no server, no sockets.
-    """
-
-    PAGES = {
-        "http://t.invalid/robots.txt": (
-            200, "text/plain", "User-agent: *\nDisallow: /admin/\n"),
-        "http://t.invalid/": (
-            200, "text/html",
-            '<a href="/admin/">admin</a>'
-            '<a href="/search?q=invoice">search</a>'
-            '<a href="/api/orders/1001">order</a>'),
-        "http://t.invalid/admin/": (
-            200, "text/html",
-            '<h1>Administrator Login</h1>'
-            '<form method="post" action="/login">'
-            '  <input type="text" name="username" value="admin">'
-            '  <input type="password" name="password">'
-            '  <input type="number" name="pin">'
-            '  <input type="submit" value="Sign in">'
-            '</form>'),
-        "http://t.invalid/search": (200, "text/html", "<h1>0 results</h1>"),
-        "http://t.invalid/api/orders/1001": (401, "application/json", "{}"),
-    }
-
-    def _run(self):
-        return ReconAgent(FakeClient(self.PAGES)).run("http://t.invalid")
-
-    def test_recon_is_an_agent(self):
-        self.assertTrue(issubclass(ReconAgent, Agent))
-
-    def test_recon_returns_a_valid_agent_result(self):
-        result = self._run()
-        self.assertIsInstance(result, AgentResult)
-        self.assertEqual(validate_result(result), [])
-
-    def test_recon_reports_seeds_and_a_finding(self):
-        result = self._run()
-        templates = {s.template for s in result.request_seeds}
-        self.assertIn("/admin/", templates)
-        self.assertEqual([f.finding_id for f in result.findings],
-                         ["robots-discloses-reachable-paths"])
-
-    def test_recon_result_serializes(self):
-        out = json.loads(json.dumps(self._run().to_dict(), ensure_ascii=False))
-        self.assertIn("request_seeds", out)
-        self.assertIn("completion", out)
-
-    def _seed(self, method, template):
-        return next(s for s in self._run().request_seeds
-                    if (s.method, s.template) == (method, template))
-
-    def test_form_body_parameters_are_captured(self):
-        # The crawler used to read only the `action` attribute and throw the
-        # inputs away, so the injection agent had to re-scrape every form.
-        seed = self._seed("POST", "/login")
-        self.assertEqual({(p.name, p.location) for p in seed.params},
-                         {("username", "body"), ("password", "body"),
-                          ("pin", "body")})
-
-    def test_form_field_types_and_values_survive(self):
-        params = {p.name: p for p in self._seed("POST", "/login").params}
-        self.assertEqual(params["username"].value, "admin")
-        self.assertEqual(params["pin"].type, "int")        # <input type="number">
-        self.assertEqual(params["password"].type, "string")
-
-    def test_submit_button_is_not_a_parameter(self):
-        # A submit control carries no data worth injecting into.
-        names = {p.name for p in self._seed("POST", "/login").params}
-        self.assertNotIn("Sign in", names)
-
-    def test_post_form_records_its_body_encoding(self):
-        self.assertEqual(self._seed("POST", "/login").body_content_type,
-                         "application/x-www-form-urlencoded")
-
-    def test_post_seed_is_not_actually_sent(self):
-        # Recon must not press state-changing buttons; it reports the shape only.
-        self.assertIsNone(self._seed("POST", "/login").observed_status)
-
-    def test_query_parameter_keeps_its_value(self):
-        params = self._seed("GET", "/search").params
-        self.assertEqual([(p.name, p.location, p.value) for p in params],
-                         [("q", "query", "invoice")])
-
-    def test_path_parameter_is_typed_and_valued(self):
-        seed = self._seed("GET", "/api/orders/{id}")
-        self.assertEqual([(p.name, p.location, p.value, p.type) for p in seed.params],
-                         [("id", "path", "1001", "int")])
-        self.assertIs(seed.auth_required, True)            # 401 observed
 
 
 if __name__ == "__main__":

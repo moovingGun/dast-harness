@@ -92,13 +92,18 @@ class Confidence(str, Enum):
 | 단계 | 기준 | 예 |
 |---|---|---|
 | `CONFIRMED` | 첨부한 요청/응답만 보면 누구나 같은 결론에 도달 | alice 세션으로 bob 데이터가 200으로 반환됨 |
-| `FIRM` | 증거는 명확하나 "그래서 취약하다"는 판단이 한 단계 들어감 | DB 오류 메시지는 떴지만 데이터 추출은 미시도 |
+| `FIRM` | 증거는 명확하나 "그래서 취약하다"는 판단이 한 단계 들어감 | 백업 파일이 200으로 받아지나 내용이 실제 민감 데이터인지 미확인 |
 | `TENTATIVE` | 응답이 수상하지만 결정적이지 않음 | 응답 시간이 길어졌으나 재현이 불안정 |
 
 **스캐너 findings의 기본값은 `CONFIRMED`** — 기존 동작이 안 바뀐다.
 
 **`CONFIRMED`가 아니면 왜 낮췄는지를 `rationale`에 적는다** (규칙 2). 이건 린터가
 못 잡으니 리뷰에서 본다. 안 적으면 다음 사람이 판단을 재현할 수 없다.
+
+**안전상 자제한 것은 confidence를 낮추지 않는다.** 파괴적·추출 페이로드를 일부러
+안 쏜 건 증거의 약점이 아니라 `withheld`에 남길 사실이다. 자제를 confidence로
+벌하면 안전하게 행동한 에이전트가 불리해지고, "증거가 약한 것"과 "일부러 멈춘 것"을
+구별할 수 없게 된다. (severity/confidence를 분리한 것과 같은 이유다)
 
 ### 2-2. `HttpExchange` — 재현 절차는 문자열이 아니라 구조체
 
@@ -519,7 +524,7 @@ AgentFinding(
     finding_id="sqli-error-based-search-q",
     name="검색 파라미터 q에 SQL 구문 주입 가능",
     severity=Severity.CRITICAL,
-    confidence=Confidence.FIRM,          # ← CONFIRMED 아님. 아래 rationale 참고
+    confidence=Confidence.CONFIRMED,     # 구문 주입이 결정적으로 보였다
     category="injection",
     matched_at="http://127.0.0.1:8080/search?q=",
     description="q 값이 SQL 문자열에 그대로 이어붙는다. 홑따옴표로 구문이 깨지고 주석으로 복구된다.",
@@ -528,9 +533,9 @@ AgentFinding(
         baseline_index=0,
         rationale=(
             "따옴표 하나로 500 + MySQL 구문 오류가 뜨고, 주석(--)을 붙이면 다시 "
-            "200으로 돌아온다. 이 쌍이 '입력이 구문으로 해석된다'는 증거다. "
-            "CONFIRMED가 아닌 이유: 실제 데이터 추출은 시도하지 않았다 "
-            "(통제 타겟이라도 파괴적/추출 페이로드는 기본 미실행)."
+            "200으로 돌아온다. 이 쌍이 '입력이 구문으로 해석된다'는 결정적 증거다. "
+            "데이터 추출은 시도하지 않았다 — 통제 타겟이라도 파괴적/추출 페이로드는 "
+            "기본 미실행이며, 그건 withheld에 남긴다."
         ),
         exchanges=[
             HttpExchange(
@@ -569,9 +574,9 @@ AgentFinding(
 )
 ```
 
-`confidence=FIRM`인 이유를 rationale에 적은 게 포인트다 (규칙 2). **왜 확신을
-낮췄는지 안 적으면 다음 사람이 판단을 재현할 수 없다.** 그리고 안 쏜 페이로드는
-`withheld`에 남는다 — "못 찾은 것"이 아니라 "일부러 안 한 것"이라는 기록이다.
+안 쏜 페이로드가 `withheld`에 남은 게 포인트다 — "못 찾은 것"이 아니라 "일부러
+안 한 것"이라는 기록이다. **그리고 그 자제가 `confidence`를 깎지 않는다.** 구문
+주입은 첨부한 세 요청만 보면 누구나 같은 결론에 도달하므로 `CONFIRMED`다.
 
 ### 예시 3 — 정찰 (`agent:recon`)
 
@@ -632,7 +637,6 @@ AgentFinding(
 
 ## 7. 지금 정하지 않는 것 (실제 finding 하나씩 나온 뒤에)
 
-- 에이전트 findings의 `severity` 판단 기준 — 사람마다 다를 텐데, 실물 보고 맞추자
 - 중복 제거 — 정찰과 injection이 같은 걸 찾았을 때 어떻게 합칠지
 - `confidence`가 낮은 findings를 리포트에 넣을지 뺄지
 

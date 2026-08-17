@@ -28,6 +28,11 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080
        q=invoice:query/string
 ```
 
+**항상 저장소 루트에서 실행한다.** `pip install -e .`은 안 쓴다 — `python3 -m ...`이
+현재 디렉터리를 모듈 경로로 잡아주기 때문이다. 따로 만든 스크립트를 돌릴 때는
+`PYTHONPATH=. python3 myscript.py`처럼 붙여라. 안 그러면
+`ModuleNotFoundError: No module named 'dast_harness'`가 난다.
+
 **`dast_harness/agent_kit/recon.py`를 복사해서 시작해라.** 명세를 처음부터
 구현하지 말 것 — 세 에이전트의 구조가 같아야 합칠 수 있다.
 
@@ -136,14 +141,50 @@ AgentFinding(
 "심각한데 확신 없음"이 자주 나온다. 하나로 뭉개면 그 정보가 사라지고 트리아지하는
 사람이 뭘 먼저 볼지 정할 수 없다.
 
-| `confidence` | 기준 |
-|---|---|
-| `CONFIRMED` | 첨부한 요청/응답만 보면 누구나 같은 결론에 도달 |
-| `FIRM` | 증거는 명확하나 "그래서 취약하다"는 판단이 한 단계 들어감 |
-| `TENTATIVE` | 수상하지만 결정적이지 않음. 사람 확인 필요 |
+| `confidence` | 기준 | 예 |
+|---|---|---|
+| `CONFIRMED` | 첨부한 요청/응답만 보면 누구나 같은 결론에 도달 | 따옴표로 구문이 깨지고 주석으로 복구됨 |
+| `FIRM` | 증거는 명확하나 "그래서 취약하다"는 판단이 한 단계 들어감 | 백업 파일이 200으로 받아지나 내용이 실제 민감 데이터인지 미확인 |
+| `TENTATIVE` | 수상하지만 결정적이지 않음. 사람 확인 필요 | 응답 시간이 길어졌으나 재현이 불안정 |
 
 **`CONFIRMED`가 아니면 왜 낮췄는지를 `rationale`에 적어라.** 안 적으면 다음 사람이
 네 판단을 재현할 수 없다. 이건 린터가 못 잡으니 리뷰에서 본다.
+
+### 안전상 자제한 것은 confidence를 낮추지 않는다
+
+파괴적·추출 페이로드를 **일부러 안 쏜 것**은 증거의 약점이 아니다. 그건
+`withheld`에 남기고 `confidence`는 그대로 둔다.
+
+```python
+confidence=Confidence.CONFIRMED,          # 구문 주입이 결정적으로 보였다
+...
+withheld=["union-select-extraction", "time-based-blind"],   # 안 쏜 것
+```
+
+이유는 `severity`/`confidence` 분리 원칙과 같다. `confidence`는 **"이 증거가
+말하는 게 맞나"**이고, "더 깊이 파면 뭐가 더 나올까"는 다른 질문이다. 자제를
+confidence로 벌하면 안전하게 행동한 에이전트가 불리해지고, 트리아지하는 사람은
+"증거가 약한 것"과 "일부러 멈춘 것"을 구별할 수 없게 된다.
+
+낮추는 건 **증거 자체가 한 단계 해석을 요구할 때**다. 예: 로그인 실패 메시지가
+다르지만 그 차이가 계정 존재 때문이라고 단정할 수 없을 때 → `FIRM`.
+
+### `severity` 고르는 기준
+
+**"진짜라면 공격자가 무엇을 할 수 있나"로만 판단한다.** 얼마나 확실한지는
+`confidence`가 따로 말하므로 여기에 섞지 않는다.
+
+| `severity` | 기준 | 예 |
+|---|---|---|
+| `CRITICAL` | 인증 없이 시스템이나 데이터 전체를 장악할 수 있다 | SQL 주입, RCE, 자격증명 파일 직접 노출 |
+| `HIGH` | 타인의 데이터나 권한에 접근할 수 있다 | IDOR, 인가 우회, 패스워드 해시 덤프, 기본 자격증명 |
+| `MEDIUM` | 공격을 쉽게 만드는 내부 정보가 새어나온다 | 버전·경로·설정 노출 (phpinfo 등) |
+| `LOW` | 단독으로는 피해가 없고 다른 공격의 보조가 된다 | 사용자 열거, 디렉터리 목록, 보안 헤더 부재 |
+| `INFO` | 취약점이라 하기 어려운 관찰 | — |
+
+이미 `ground_truth.json`에 있는 취약점이면 **거기 적힌 `severity`를 그대로 쓴다.**
+정답지 밖의 새 취약점을 찾았으면 위 표로 정하고, 정답지에 항목을 추가할 때
+`severity`도 같이 적는다.
 
 ### `Probe` — 무엇을 겨눠 몇 번 시도했나
 
@@ -396,9 +437,33 @@ python3 targets/vulnerable_app/app.py        # 127.0.0.1:8080
 100자 초과 입력에 500을 뱉되 **SQL 오류 문구는 절대 안 나온다.** 여기서 injection
 finding이 나오면 오탐이다. `ground_truth.json`의 `must_not_detect`에 들어 있다.
 
-정답지(`targets/vulnerable_app/ground_truth.json`)에 `idor` / `injection` /
-`user-enumeration` 항목이 이미 있다. **새 취약점을 찾게 만들면 정답지에도 항목을
-추가해라** — 없으면 잘 만들었는지 잴 방법이 없다.
+### 채점되려면 `finding_id`에 정답지 키워드가 들어가야 한다
+
+정답지(`targets/vulnerable_app/ground_truth.json`)는 finding의 **id나 name에
+`match_any`의 문자열이 들어 있는지**로 탐지를 인정한다. 예를 들어 injection 항목은
+
+```json
+"match_any": ["sqli", "sql injection", "sql syntax"]
+```
+
+이므로 `finding_id="sqli-error-based-search-q"`처럼 지어야 채점된다.
+`finding_id="query-param-issue"`로 지으면 잘 찾아도 **미탐으로 집계된다.**
+
+`severity`도 정답지에 적혀 있으니 그 값을 그대로 쓴다.
+
+이미 `idor` / `injection` / `user-enumeration` 항목이 있으므로 **정답지를 새로 고칠
+필요는 없다.** 정답지에 없는 새 취약점을 찾게 만들었을 때만 항목을 추가한다
+(그때 `severity`도 같이 적는다).
+
+### POST는 `/login`만 받는다
+
+정찰이 `POST /admin/` 같은 씨앗도 내지만, 타겟은 `/login` 외의 POST에 **405**를
+돌려준다. 그런 씨앗은 검사할 수 없으므로 `skipped`로 넘기고 이유를 남겨라.
+
+```python
+return self.finish(findings, tested=4, skipped=2,
+                   skip_reasons={"method-not-allowed": 2})
+```
 
 ---
 
@@ -417,10 +482,12 @@ print(validate_result(result) or "통과")
 ```
 
 - [ ] 에이전트를 실제 타겟에 한 번 돌렸다 (`AssertionError` 없음)
+- [ ] `tests/test_<에이전트>.py`를 만들었다 (`tests/test_recon.py` 복사)
 - [ ] `confidence`가 `CONFIRMED`가 아닌 finding은 `rationale`에 이유를 적었다
 - [ ] 증거에 기준선과 대조가 들어 있다 (`baseline_index` 채움)
 - [ ] `/lookup`에서 finding이 나오지 않는다 (injection 팀)
 - [ ] 새 취약점이면 `ground_truth.json`에 항목을 추가했다
+- [ ] `severity`는 정답지 값과 같다 (정답지 밖이면 §4 기준표로 정했다)
 - [ ] `python3 -m unittest discover -s tests` 통과
 
 ---
@@ -437,6 +504,9 @@ print(validate_result(result) or "통과")
 | `coverage.findings(0)가 실제 1건과 다름` | `Coverage`를 손으로 만들었다. `finish()`를 써라 |
 | `요청 예산 초과` | 루프가 폭주했다. `max_requests`를 올리기 전에 로직을 봐라 |
 | 씨앗의 `observed_status`가 `None` | 정찰은 POST를 보내지 않는다. 모양만 찾은 것 |
+| POST 씨앗이 `405` | 타겟은 `/login` 외 POST를 안 받는다. `skipped`로 넘겨라 |
+| `ModuleNotFoundError: dast_harness` | 저장소 루트에서 실행하지 않았다 (§1) |
+| 잘 찾았는데 `validate.py`가 미탐으로 셈 | `finding_id`에 정답지 `match_any` 문자열이 없다 (§8) |
 
 ---
 
