@@ -20,8 +20,8 @@ from collections import deque
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from ..models import Severity
-from .contract import (AgentFinding, Confidence, Endpoint, Evidence,
-                       validate_finding)
+from .contract import (AgentFinding, Confidence, Coverage, Endpoint, Evidence,
+                       Probe, validate_finding)
 from .http import AgentHttpClient
 
 HREF = re.compile(r"""(?:href|src|action)\s*=\s*["']([^"'>\s]+)""", re.I)
@@ -150,11 +150,15 @@ class ReconAgent:
                 ),
                 exchanges=[robots, proof],
             ),
-            agent_data={self.name: {
-                "disallowed": disallowed,
-                "reachable": reachable,
-                "pages_crawled": len(self.exchanges),
-            }},
+            agent_data={self.name: Probe(
+                strategy="robots-disallow-then-fetch",
+                target="/robots.txt",
+                target_kind="endpoint",
+                attempts=len(disallowed),
+                hits=reachable,
+                actors=["anon"],
+                extra={"disallowed": disallowed},
+            )},
         ))
 
     # -------------------------------------------------------------------- 실행
@@ -169,6 +173,12 @@ class ReconAgent:
         return {
             "endpoints": sorted(self.endpoints.values(), key=lambda e: (e.url_template, e.method)),
             "findings": self.findings,
+            "coverage": Coverage(
+                unit="endpoint",
+                tested=len(self.exchanges),
+                requests=self.client.request_count,
+                findings=len(self.findings),
+            ),
             "requests_made": self.client.request_count,
             "blocked": self.client.blocked,
         }

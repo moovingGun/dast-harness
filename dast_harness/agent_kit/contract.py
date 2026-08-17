@@ -19,6 +19,8 @@ MASKED = "***"
 SENSITIVE_HEADERS = ("authorization", "cookie", "set-cookie", "x-api-key")
 
 # ground_truth.json이 이미 쓰는 어휘 + 에이전트용 2개.
+TARGET_KINDS = ("object-id", "parameter", "endpoint", "header", "path")
+
 CATEGORIES = (
     "exposure",
     "information-disclosure",
@@ -92,6 +94,41 @@ class Evidence:
 
 
 @dataclass
+class Probe:
+    """이 finding을 만들기까지 에이전트가 뭘 했는지. **세 에이전트 공통 모양.**
+
+    취약점 자체는 name/severity/evidence가 설명한다. Probe는 그 옆에서
+    "무엇을 겨눠 몇 번 시도했고 뭐가 걸렸나"를 남긴다. 스캐너의
+    CompletionEvidence에 해당하는 에이전트판.
+    """
+
+    strategy: str                    # "sequential-id" / "error-based-sqli" / "login-differential"
+    target: str                      # 겨냥한 대상: "id", "q", "/login"
+    target_kind: str                 # "object-id" | "parameter" | "endpoint" | "header"
+    attempts: int = 0                # 시도 횟수
+    hits: list[str] = field(default_factory=list)      # 걸린 것 (id/페이로드/계정)
+    actors: list[str] = field(default_factory=list)    # 사용한 신원
+    withheld: list[str] = field(default_factory=list)  # 안전상 안 한 것
+    extra: dict = field(default_factory=dict)          # 에이전트 고유. **여기만 자유**
+
+
+@dataclass
+class Coverage:
+    """실행 전체 요약. finding이 0건이어도 남는다.
+
+    "못 찾은 것"과 "안 찾아본 것"을 구분하기 위한 필드다. 이게 없으면
+    탐지율 숫자가 무슨 뜻인지 알 수 없다. Finding이 아니라 run() 반환값에 담는다.
+    """
+
+    unit: str                        # "parameter" | "object-id" | "endpoint"
+    tested: int = 0
+    skipped: int = 0
+    skip_reasons: dict = field(default_factory=dict)   # {"no-auth-session": 3}
+    requests: int = 0
+    findings: int = 0
+
+
+@dataclass
 class AgentFinding(Finding):
     """기존 Finding + v0 추가 필드. 전부 기본값이 있어 상속이 안전하다."""
 
@@ -162,9 +199,22 @@ def validate_finding(f: Finding) -> list[str]:
                 errs.append(f"규칙5: exchanges[{i}] excerpt가 {MAX_EXCERPT}자 초과")
 
     # --- 규칙 4
-    strays = [k for k in getattr(f, "agent_data", {}) if k != agent_name]
+    data = getattr(f, "agent_data", {})
+    strays = [k for k in data if k != agent_name]
     if strays:
         errs.append(f"규칙4: agent_data에 남의 이름공간 침범 {strays} (허용: {agent_name!r})")
+
+    # --- 규칙 6: agent_data[<이름>]은 Probe 모양이어야 한다
+    probe = data.get(agent_name)
+    if probe is None:
+        errs.append(f"규칙6: agent_data[{agent_name!r}]에 Probe가 없음")
+    else:
+        d = probe if isinstance(probe, dict) else getattr(probe, "__dict__", {})
+        missing = [k for k in ("strategy", "target", "target_kind") if not d.get(k)]
+        if missing:
+            errs.append(f"규칙6: Probe에 {missing} 누락")
+        if d.get("target_kind") not in TARGET_KINDS:
+            errs.append(f"규칙6: target_kind가 어휘 밖: {d.get('target_kind')!r}")
 
     # --- 규칙 1 보조: raw는 스캐너 원본 전용
     if f.raw:
@@ -199,6 +249,7 @@ def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
 
 __all__ = [
     "Confidence", "HttpExchange", "Evidence", "AgentFinding", "Endpoint",
+    "Probe", "Coverage", "TARGET_KINDS",
     "validate_finding", "finding_to_dict", "CATEGORIES", "MAX_EXCERPT",
     "Severity",
 ]
