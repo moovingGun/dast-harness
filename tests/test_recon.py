@@ -146,6 +146,76 @@ class ReconFormParsingTest(unittest.TestCase):
             [("amount", "body")])
 
 
+class ReconLargePageTest(unittest.TestCase):
+    """Parsing must use the full body, not the evidence excerpt.
+
+    `HttpExchange.response_excerpt` is truncated to `MAX_EXCERPT` so that reports
+    stay small. Parsing HTML out of it silently loses everything past the cutoff,
+    and because a form needs its closing tag, a half-visible form contributes
+    nothing at all — no error, no skip reason.
+    """
+
+    def _page_with_form_after(self, filler_len):
+        return ("<html><body>" + ("x" * filler_len) +
+                '<form method="post" action="/login">'
+                '<input name="username"><input name="password">'
+                '</form></body></html>')
+
+    def _seeds(self, filler_len):
+        html = self._page_with_form_after(filler_len)
+        agent = ReconAgent(FakeClient({
+            f"{ORIGIN}/robots.txt": (404, "text/plain", ""),
+            f"{ORIGIN}/": (200, "text/html", html),
+        }))
+        return {(s.method, s.template) for s in agent.run(ORIGIN).request_seeds}
+
+    def test_form_near_the_top_is_found(self):
+        self.assertIn(("POST", "/login"), self._seeds(50))
+
+    def test_form_past_the_excerpt_cutoff_is_still_found(self):
+        # 2048 is MAX_EXCERPT; the form starts well beyond it.
+        self.assertIn(("POST", "/login"), self._seeds(4000))
+
+    def test_link_past_the_excerpt_cutoff_is_still_crawled(self):
+        html = ("<html><body>" + ("x" * 4000) +
+                '<a href="/deep">deep</a></body></html>')
+        agent = ReconAgent(FakeClient({
+            f"{ORIGIN}/robots.txt": (404, "text/plain", ""),
+            f"{ORIGIN}/": (200, "text/html", html),
+            f"{ORIGIN}/deep": (200, "text/html", "<h1>deep</h1>"),
+        }))
+        templates = {s.template for s in agent.run(ORIGIN).request_seeds}
+        self.assertIn("/deep", templates)
+
+    def test_evidence_excerpt_stays_bounded(self):
+        # The fix must not widen what lands in the report.
+        agent = ReconAgent(FakeClient({
+            f"{ORIGIN}/robots.txt": (404, "text/plain", ""),
+            f"{ORIGIN}/": (200, "text/html", self._page_with_form_after(4000)),
+        }))
+        agent.run(ORIGIN)
+        excerpt = agent.exchanges[f"{ORIGIN}/"].response_excerpt
+        self.assertLessEqual(len(excerpt), 2048 + 16)
+        self.assertGreater(len(agent.bodies[f"{ORIGIN}/"]), len(excerpt))
+
+
+class ReconEntityTest(unittest.TestCase):
+    """`&amp;` in a link must be decoded before the URL is used."""
+
+    def test_ampersand_entity_does_not_leak_into_a_parameter_name(self):
+        agent = ReconAgent(FakeClient({
+            f"{ORIGIN}/robots.txt": (404, "text/plain", ""),
+            f"{ORIGIN}/": (200, "text/html",
+                           '<a href="/s?a=1&amp;b=2">search</a>'),
+            f"{ORIGIN}/s": (200, "text/html", "<h1>ok</h1>"),
+        }))
+        seed = next(s for s in agent.run(ORIGIN).request_seeds
+                    if s.template == "/s")
+        # Before the fix this was [('a', '1'), ('amp;b', '2')].
+        self.assertEqual([(p.name, p.value) for p in seed.params],
+                         [("a", "1"), ("b", "2")])
+
+
 class ReconSeedMergeTest(unittest.TestCase):
     """Two URLs of the same shape collapse into one seed."""
 
