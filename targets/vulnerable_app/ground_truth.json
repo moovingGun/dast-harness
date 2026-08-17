@@ -1,6 +1,6 @@
 {
   "target": "http://127.0.0.1:8080",
-  "notes": "Weaknesses deliberately served by app.py. `match_any` holds lowercase substrings; a scanner finding counts as a detection when its id/name contains one of them and it was observed at `path`.",
+  "notes": "Weaknesses deliberately served by app.py. `match_any` holds lowercase substrings; a scanner finding counts as a detection when its id/name contains one of them and it was observed at `path`. Optional `as_actor` names the session a request needs before the weakness is observable (agent findings only). `must_not_detect` lists endpoints that look suspicious but are sound: a finding matching one of those is a false positive, not a detection.",
   "expected": [
     {
       "id": "exposed-dotenv",
@@ -63,6 +63,41 @@
         "strict-transport-security"
       ],
       "match_any": ["security header", "x-frame-options", "clickjacking", "content-security-policy", "content security policy", "x-content-type-options"]
+    },
+    {
+      "id": "user-enumeration-login",
+      "path": "/login",
+      "category": "information-disclosure",
+      "description": "Login failure messages differ for unknown accounts and wrong passwords, so the account list is enumerable",
+      "body_contains": "action=\"/login\"",
+      "match_any": ["user enumeration", "user-enumeration", "username enumeration", "account enumeration"]
+    },
+    {
+      "id": "sqli-error-based-search-q",
+      "path": "/search",
+      "category": "injection",
+      "description": "Search parameter q is concatenated into SQL: an unbalanced quote raises a DB syntax error and a -- comment repairs it",
+      "body_contains": "results for",
+      "match_any": ["sqli", "sql injection", "sql syntax"]
+    },
+    {
+      "id": "idor-order-object-access",
+      "path": "/api/orders/1002",
+      "category": "idor",
+      "description": "Order API checks the session but not object ownership, so any signed-in user reads any order",
+      "as_actor": "alice",
+      "body_contains": "bob@example.com",
+      "match_any": ["idor", "object ownership", "broken access control", "bola"]
+    }
+  ],
+  "must_not_detect": [
+    {
+      "id": "lookup-not-injectable",
+      "path": "/lookup",
+      "category": "injection",
+      "description": "Directory lookup 500s on absurdly long input but never echoes a SQL error, and quotes are handled correctly. An injection finding here is a false positive.",
+      "body_contains": "people matching",
+      "match_any": ["sqli", "sql injection", "sql syntax", "injection"]
     }
   ]
 }
