@@ -44,11 +44,11 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | **정찰 에이전트** — 크롤 + 폼 파싱 → 요청 씨앗 인벤토리 |
 | ⬜ | injection 에이전트 ← 팀원 작업 |
 | ⬜ | IDOR 에이전트 ← 팀원 작업 |
-| 🔶 | 리포터에 에이전트 필드(`confidence`/`evidence`) 반영 — 별도 PR 진행 중 |
+| ✅ | 리포터에 에이전트 필드(`confidence`/`evidence`/`agent_data`) 반영 |
 | ⬜ | 에이전트를 CLI·오케스트레이터에 꽂는 배관 |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 247개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 254개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
