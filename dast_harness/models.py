@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any
 
@@ -135,6 +135,56 @@ class Finding:
     description: str = ""
     tags: list[str] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+# Agent findings (agent_kit.contract.AgentFinding) add confidence/category/
+# evidence/agent_data by subclassing Finding, so they arrive here as plain
+# Findings with extra attributes. Read those with getattr, never as fields:
+# this module must keep working for scanner findings that do not have them.
+DEFAULT_CONFIDENCE = "confirmed"
+
+
+def confidence_value(finding: Finding) -> str:
+    """The finding's confidence as a string. Scanner findings are confirmed.
+
+    Kept separate from `severity` on purpose: severity is how bad it is if real,
+    confidence is how sure we are that it is real. Collapsing the two loses the
+    "severe but unsure" case that agents produce constantly.
+    """
+    return getattr(getattr(finding, "confidence", None), "value", DEFAULT_CONFIDENCE)
+
+
+def finding_to_dict(finding: Finding, *, include_raw: bool = False,
+                    include_evidence: bool = True) -> dict[str, Any]:
+    """Serialize a finding, agent fields included.
+
+    The single serializer for findings: reporters and the agent kit both call
+    this, so a new field cannot land in one output and go missing from the
+    other. `evidence` and `agent_data` hold dataclasses (Evidence, HttpExchange,
+    Probe), which are flattened here — otherwise json.dumps raises on them.
+    """
+    out: dict[str, Any] = {
+        "scanner": finding.scanner,
+        "id": finding.finding_id,
+        "name": finding.name,
+        "severity": finding.severity.value,
+        "confidence": confidence_value(finding),
+        "category": getattr(finding, "category", ""),
+        "matched_at": finding.matched_at,
+        "description": finding.description,
+        "tags": list(finding.tags),
+    }
+    evidence = getattr(finding, "evidence", None)
+    if include_evidence and evidence is not None:
+        out["evidence"] = asdict(evidence)
+    agent_data = getattr(finding, "agent_data", None)
+    if agent_data:
+        out["agent_data"] = {
+            k: asdict(v) if is_dataclass(v) else v for k, v in agent_data.items()
+        }
+    if include_raw:
+        out["raw"] = finding.raw
+    return out
 
 
 @dataclass

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ..models import DEFAULT_CONFIDENCE, confidence_value
 from .base import Reporter, ScanReport
 
 
@@ -34,7 +35,14 @@ class ConsoleReporter(Reporter):
         if report.findings:
             lines.append("")
             for f in report.sorted_findings():
-                lines.append(f"  [{f.severity.value:8}] {f.finding_id}  @ {f.matched_at}")
+                # Severity says how bad it would be, so an unsure finding still
+                # sorts high. Flagging only the unsure ones keeps scanner output
+                # unchanged while telling a triager which ones need a human.
+                conf = confidence_value(f)
+                mark = "" if conf == DEFAULT_CONFIDENCE else f"  ({conf})"
+                lines.append(
+                    f"  [{f.severity.value:8}] {f.finding_id}  @ {f.matched_at}{mark}"
+                )
         if s.get("error"):
             lines.append("")
             lines.append(f"Error  : {s['error']}")

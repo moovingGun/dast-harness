@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from ..models import Finding
+from ..models import Finding, finding_to_dict
 from .base import Reporter, ScanReport
 
 _CLEAN = {"completed", "completed_with_warnings"}
@@ -41,15 +41,7 @@ class JSONReporter(Reporter):
         return json.dumps(payload, indent=self.indent, ensure_ascii=False)
 
     def _finding_dict(self, f: Finding) -> dict:
-        out = {
-            "scanner": f.scanner,
-            "id": f.finding_id,
-            "name": f.name,
-            "severity": f.severity.value,
-            "matched_at": f.matched_at,
-            "description": f.description,
-            "tags": f.tags,
-        }
-        if self.include_raw:
-            out["raw"] = f.raw
-        return out
+        # Delegated so agent fields (confidence, category, evidence, agent_data)
+        # cannot silently vanish here: this used to be a hand-kept whitelist and
+        # it dropped every one of them without raising.
+        return finding_to_dict(f, include_raw=self.include_raw)
