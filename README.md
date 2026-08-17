@@ -8,6 +8,27 @@
 스캔을 실행하고 상태·결과를 조회하며, **loopback 또는 명시적으로 허가된 대상만**
 스캔하도록 안전장치를 강제한다.
 
+## CLI
+
+```bash
+python -m dast_harness scan http://127.0.0.1:8080 \
+    --scanner nuclei,nikto \      # 기본: 설치된 것 전부
+    --allow staging.internal \    # allowlist 추가 (반복 가능)
+    --severity high,critical \    # nuclei passthrough
+    --timeout 120 \               # 그룹 전체 deadline
+    --format json -o results.json # console(기본) | json
+```
+
+종료 코드(스크립팅/CI 연동용):
+
+| 코드 | 의미 |
+|---|---|
+| `0` | `completed` / `completed_with_warnings` |
+| `1` | `partial` / `failed` |
+| `2` | 잘못된 인자·설정, 대상 거부, 스캐너 미설치 |
+| `124` | 그룹 timeout |
+| `130` | 사용자 중단(Ctrl-C) |
+
 ## 구조
 
 ```
@@ -19,6 +40,7 @@ dast_harness/
   scanners/nikto.py  # nikto 실행 + 종료 후 JSON 파일 파싱 → Finding 정규화
   runner.py          # 단일 스캐너: start_scan / get_status / get_results / stop_scan / wait
   orchestrator.py    # MultiScanRunner: 여러 스캐너 병렬 실행 + 롤업/병합
+  cli.py             # argparse 기반 one-shot CLI (python -m dast_harness scan)
   reporters/base.py  # Reporter 인터페이스 + ScanReport (출력 전용 계층)
   reporters/json_reporter.py     # findings → JSON 문자열
   reporters/console_reporter.py  # 심각도별 콘솔 요약
