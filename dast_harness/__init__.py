@@ -1,5 +1,7 @@
 """Minimal DAST harness around a single scanner (nuclei)."""
 
+__version__ = "0.1.0"
+
 from .models import (
     CompletionEvidence,
     Finding,
