@@ -164,8 +164,11 @@ def validate_finding(f: Finding) -> list[str]:
     """
     errs: list[str] = []
 
-    if f.category and f.category not in CATEGORIES:
-        errs.append(f"category가 어휘 밖: {f.category!r} (허용: {', '.join(CATEGORIES)})")
+    # 스캐너 Finding에는 category 필드가 없다. 스캐너/에이전트 findings를 한 리스트에
+    # 담아 검사하는 게 정상 사용법이므로 getattr로 읽는다.
+    category = getattr(f, "category", "")
+    if category and category not in CATEGORIES:
+        errs.append(f"category가 어휘 밖: {category!r} (허용: {', '.join(CATEGORIES)})")
 
     if not f.scanner.startswith("agent:"):
         return errs  # 스캐너 finding은 여기까지만
@@ -226,7 +229,7 @@ def validate_finding(f: Finding) -> list[str]:
 def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
     """리포터용 직렬화. 기존 JSONReporter는 필드를 화이트리스트로 고르기 때문에
     v0 필드가 **조용히 사라진다** — 리포터를 고칠 때까지 이걸 쓴다."""
-    from dataclasses import asdict
+    from dataclasses import asdict, is_dataclass
 
     out = {
         "scanner": f.scanner,
@@ -242,8 +245,12 @@ def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
     ev = getattr(f, "evidence", None)
     if include_evidence and ev is not None:
         out["evidence"] = asdict(ev)
-    if getattr(f, "agent_data", None):
-        out["agent_data"] = f.agent_data
+    data = getattr(f, "agent_data", None)
+    if data:
+        # 규칙6이 요구하는 Probe는 dataclass다. 펴지 않으면 json.dumps가 터진다.
+        out["agent_data"] = {
+            k: asdict(v) if is_dataclass(v) else v for k, v in data.items()
+        }
     return out
 
 
