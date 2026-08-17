@@ -14,6 +14,7 @@ from enum import Enum
 from urllib.parse import urlparse
 
 from ..models import Finding, Severity
+from ..models import finding_to_dict as _finding_to_dict
 
 MAX_EXCERPT = 2048
 MASKED = "***"
@@ -454,31 +455,9 @@ def validate_finding(f: Finding) -> list[str]:
 
 
 def finding_to_dict(f: Finding, *, include_evidence: bool = True) -> dict:
-    """리포터용 직렬화. 기존 JSONReporter는 필드를 화이트리스트로 고르기 때문에
-    v0 필드가 **조용히 사라진다** — 리포터를 고칠 때까지 이걸 쓴다."""
-    from dataclasses import asdict, is_dataclass
-
-    out = {
-        "scanner": f.scanner,
-        "id": f.finding_id,
-        "name": f.name,
-        "severity": f.severity.value,
-        "confidence": getattr(f, "confidence", Confidence.CONFIRMED).value,
-        "category": getattr(f, "category", ""),
-        "matched_at": f.matched_at,
-        "description": f.description,
-        "tags": list(f.tags),
-    }
-    ev = getattr(f, "evidence", None)
-    if include_evidence and ev is not None:
-        out["evidence"] = asdict(ev)
-    data = getattr(f, "agent_data", None)
-    if data:
-        # 규칙6이 요구하는 Probe는 dataclass다. 펴지 않으면 json.dumps가 터진다.
-        out["agent_data"] = {
-            k: asdict(v) if is_dataclass(v) else v for k, v in data.items()
-        }
-    return out
+    """리포터용 직렬화. `models.finding_to_dict`로 위임한다 — 직렬화가 두 군데
+    있으면 한쪽에만 필드가 추가되는 사고가 난다. `JSONReporter`도 같은 걸 쓴다."""
+    return _finding_to_dict(f, include_evidence=include_evidence)
 
 
 __all__ = [

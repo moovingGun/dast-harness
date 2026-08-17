@@ -679,18 +679,24 @@ AgentFinding(
 통과시켰다. → `finding_to_dict()`에서 `asdict`로 편다. 에이전트마다 손으로
 `asdict`하게 하면 규칙 6이 무의미해지므로 직렬화 쪽이 책임지는 게 맞다.
 
-### 남은 blocker 1개
+### 리포터도 붙었다 (blocker 없음)
 
-**`JSONReporter`가 아직 화이트리스트다** — `json_reporter.py:45-57`.
-확인된 출력 키:
+`JSONReporter`가 필드를 화이트리스트로 골라서 `confidence`/`category`/`evidence`/
+`agent_data`가 **조용히 사라지고 있었다.** 예외도 안 났다. 계약을 합의해도 리포터를
+같이 안 고치면 증거가 리포트에 안 실린다.
+
+직렬화를 `models.finding_to_dict()` 하나로 합쳐서 `JSONReporter`와
+`contract.finding_to_dict()`가 같은 걸 쓴다. 두 군데 있으면 한쪽에만 필드가
+추가되는 사고가 다시 난다. 실제 리포트에 실리는 키:
 
 ```
-['description', 'id', 'matched_at', 'name', 'scanner', 'severity', 'tags']
+['agent_data', 'category', 'confidence', 'description', 'evidence',
+ 'id', 'matched_at', 'name', 'scanner', 'severity', 'tags']
 ```
 
-→ `confidence`, `category`, `evidence`, `agent_data`가 **조용히 사라진다.** 예외도
-안 난다. `contract.finding_to_dict()`가 우회로로 있지만 리포터 경로에 안 꽂혀
-있어서 실제 리포트에서는 여전히 증발한다.
+`ConsoleReporter`는 `CONFIRMED`가 아닌 finding에만 `(firm)` / `(tentative)`를
+붙인다. severity는 "진짜면 얼마나 심각한가"이므로 확신이 없어도 위에 정렬되는 게
+맞고, 대신 사람이 봐야 할 게 뭔지는 표시돼야 한다. 스캐너 출력은 한 글자도 안 바뀐다.
 
 ### 아직 안 된 것: 하네스에 꽂는 자리
 
