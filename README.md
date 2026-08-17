@@ -38,6 +38,13 @@ dast-harness scan http://127.0.0.1:8080 \
 | `124` | 그룹 timeout |
 | `130` | 사용자 중단(Ctrl-C) |
 
+## 에이전트를 만든다면
+
+정찰 / injection / IDOR 에이전트를 이 하네스에 붙이는 방법은
+**[AGENT_GUIDE.md](AGENT_GUIDE.md)** 에 있다. 결과 형식 계약, 동작하는 예시,
+연습용 타겟, 커밋 전 체크리스트가 전부 거기 있다.
+(`finding-v0-proposal.md`는 그 계약을 정할 때의 설계 논의 기록이다.)
+
 ## 구조
 
 ```

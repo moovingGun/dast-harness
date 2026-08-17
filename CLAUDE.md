@@ -47,21 +47,25 @@ ex = client.request("GET", "http://127.0.0.1:8080/admin/", actor="anon")
 
 ## 에이전트를 만들 때
 
-읽을 것: `finding-v0-proposal.md` (결과 형식 계약)
+읽을 것: `AGENT_GUIDE.md` (작성 가이드 — 이것만 봐도 시작할 수 있다)
 베낄 것: `dast_harness/agent_kit/recon.py` (동작하는 골격)
+참고: `finding-v0-proposal.md` (계약을 정할 때의 설계 논의 기록)
 
 **명세를 처음부터 구현하지 말고 `recon.py`를 복사해서 고쳐라.** 세 에이전트의
 구조가 같아야 마지막에 합칠 수 있다.
 
-지켜야 하는 계약 5개:
+지켜야 하는 계약 6개:
 
 1. `severity`(진짜면 얼마나 심각한가)와 `confidence`(진짜일 확신)를 섞지 않는다
-2. `confidence`가 `CONFIRMED`가 아니면 `evidence`는 필수다
+2. 에이전트 finding에 `evidence`는 **항상** 필수다 (`exchanges`·`rationale` 포함)
 3. `scanner` 값에 `agent:` 접두사를 붙인다 (`agent:idor`)
-4. `agent_data`는 자기 에이전트 이름 키 아래에만 쓴다
+4. `agent_data`는 자기 에이전트 이름 키 아래에만 쓴다. `raw`는 안 쓴다
 5. 자격증명 헤더 마스킹, `response_excerpt` 2048자 이내
+6. `agent_data[<자기이름>]`은 `Probe`다 (`strategy`/`target`/`target_kind` 필수)
 
-`validate_finding(f)`가 위 5개를 검사한다. 커밋 전에 통과시켜라.
+`validate_finding(f)`가 위 6개를 검사한다. 에이전트 반환값 전체는
+`validate_result(r)`이 검사하고, `Agent.finish()`가 이걸 자동으로 돌린다.
+커밋 전에 통과시켜라.
 
 ### 증거는 "기준선 + 대조"로 만든다
 
