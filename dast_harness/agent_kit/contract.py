@@ -125,8 +125,9 @@ class Coverage:
     tested: int = 0
     skipped: int = 0
     skip_reasons: dict = field(default_factory=dict)   # {"no-auth-session": 3}
-    requests: int = 0
     findings: int = 0
+    # 요청 수는 여기 없다 — AgentCompletion.requests_made가 유일한 출처다.
+    # 같은 값을 두 곳에 두면 한쪽만 갱신됐을 때 리포트가 자기모순을 일으킨다.
 
 
 @dataclass
@@ -206,12 +207,13 @@ class AgentCompletion:
 
     `blocked`에는 안전장치가 거부한 요청이 남는다 — 타겟 페이지에 심어진 프롬프트
     인젝션의 흔적이 여기 쌓이므로 버리면 안 된다.
+
+    중단/실패 여부(`stopped`/`error`)는 아직 없다. 그걸 채울 러너가 없어서 항상
+    같은 값이 들어갈 뿐이었다. 배관을 붙일 때 같이 넣는다.
     """
 
     requests_made: int = 0
     blocked: list[tuple[str, str]] = field(default_factory=list)   # (url, 거부 사유)
-    stopped: bool = False            # 중단 요청으로 끊겼나
-    error: str = ""                  # 비어 있으면 정상 종료
 
 
 @dataclass

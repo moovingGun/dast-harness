@@ -48,8 +48,6 @@ class Agent(ABC):
         tested: int,
         skipped: int = 0,
         skip_reasons: Mapping[str, int] | None = None,
-        stopped: bool = False,
-        error: str = "",
         **extra,
     ) -> AgentResult:
         """결과를 만들고 계약을 검사한다. 위반이면 `AssertionError`.
@@ -70,14 +68,11 @@ class Agent(ABC):
                 tested=tested,
                 skipped=skipped,
                 skip_reasons=dict(skip_reasons or {}),
-                requests=self.client.request_count,
                 findings=len(findings),
             ),
             completion=AgentCompletion(
                 requests_made=self.client.request_count,
                 blocked=list(self.client.blocked),
-                stopped=stopped,
-                error=error,
             ),
             **extra,
         )

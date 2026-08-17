@@ -356,7 +356,7 @@ class SerializationTest(unittest.TestCase):
     def test_coverage_is_serializable(self):
         out = json.loads(json.dumps(asdict(Coverage(
             unit="object-id", tested=4, skipped=1,
-            skip_reasons={"no-auth-session": 1}, requests=9, findings=1))))
+            skip_reasons={"no-auth-session": 1}, findings=1))))
         self.assertEqual(out["skip_reasons"], {"no-auth-session": 1})
 
 
@@ -473,7 +473,6 @@ class AgentBaseTest(unittest.TestCase):
         self.assertEqual(result.agent, "idor")
         self.assertEqual(result.coverage.unit, "object-id")
         self.assertEqual(result.coverage.tested, 3)
-        self.assertEqual(result.coverage.requests, 11)
         self.assertEqual(result.completion.requests_made, 11)
 
     def test_finish_counts_findings_itself(self):

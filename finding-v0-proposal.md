@@ -288,11 +288,12 @@ class ReconResult(AgentResult):
 
 @dataclass
 class AgentCompletion:
-    requests_made: int = 0
+    requests_made: int = 0                # 요청 수의 **유일한** 출처
     blocked: list[tuple[str, str]] = []   # 안전장치가 거부한 요청
-    stopped: bool = False
-    error: str = ""
 ```
+
+중단/실패 여부(`stopped`/`error`)는 아직 없다 — 그걸 채울 러너가 없어서 항상 같은
+값이 들어갈 뿐이었다. 배관을 붙일 때 같이 넣는다.
 
 `coverage`와 `completion`을 나눈 이유: 전자는 "무엇을 얼마나 봤나", 후자는
 "끝까지 갔나"다. 섞으면 **0건 발견이 완주 결과인지 중간에 끊긴 결과인지 구별할 수
@@ -392,7 +393,6 @@ class Coverage:
     tested: int = 0
     skipped: int = 0
     skip_reasons: dict = ...     # {"no-auth-session": 3}
-    requests: int = 0
     findings: int = 0
 ```
 
