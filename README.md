@@ -50,9 +50,9 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | **씨앗 핸드오프** — 정찰 `request_seeds` → 뒤 에이전트의 `self.seeds` |
 | ✅ | **서브에이전트 통로** (`dast-harness probe`) — LLM이 안전 경계 안에서만 요청 |
 | ✅ | **서브에이전트 결과 게이트** (`dast-harness ingest`) — JSON → `AgentFinding` + 계약 검사 |
-| ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
+| ✅ | **에이전트 findings 채점** + 오탐(`must_not_detect`) 채점 + `--ingest` |
 
-테스트 352개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 367개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -170,9 +170,8 @@ example.py / example_multi.py   스캐너 사용 예시
 에이전트를 만들었으면 `cli.py`의 `AGENTS`에 한 줄 등록하면 CLI에서 바로 돈다
 (아래 [에이전트 실행](#에이전트-실행-agent_runnerpy)).
 
-> **아직 안 된 것:** `validate.py`는 에이전트 findings를 채점하지 못한다
-> (`-s agent:...`를 주면 조용히 빼먹는 대신 거부한다). `must_not_detect`(오탐 함정)도
-> 채점에 안 물려 있다.
+> **아직 안 된 것:** 에이전트 실행 중 Ctrl-C는 에이전트 경계에서만 듣는다
+> (요청 단위로 끊으려면 `AgentHttpClient`에 stop_event가 필요하다).
 
 ## 스캐너 (scanners/)
 
@@ -547,10 +546,31 @@ python -m dast_harness.validate                 # 사람이 읽는 요약
 python -m dast_harness.validate --json          # 기계용 (stdout은 순수 JSON)
 ```
 
-정답지 항목마다 "어느 스캐너가 무슨 finding으로 탐지했는가"를 붙이고 **recall**
-(= 탐지된 항목 / 전체 항목)을 계산한다. 매칭은 finding의 id·name에 대한 키워드
+```bash
+python -m dast_harness.validate -s agent:recon --auth targets/vulnerable_app/actors.json
+python -m dast_harness.validate --ingest findings.json    # 서브에이전트 산출물 채점
+```
+
+정답지 항목마다 "어느 스캐너/에이전트가 무슨 finding으로 탐지했는가"를 붙이고
+**recall**(= 탐지된 항목 / **시도된** 항목)을 계산한다. 매칭은 finding의 id·name에 대한 키워드
 매칭이며, 정답지 순서상 **먼저 나온 항목이 이긴다**(구체적인 항목을 위에 둘 것).
 한 finding이 두 항목에 중복 계상되지 않는다.
+
+### 세 부류를 구분한다
+
+| | 뜻 |
+|---|---|
+| **detected** | 정답지 항목을 잡았다 |
+| **false positive** | `must_not_detect`에 적힌 **멀쩡한 엔드포인트**를 취약하다고 보고했다. 이건 틀린 것이다 |
+| **unexpected** | 정답지에 없는 finding. **오탐이 아니라 수동 트리아지 대상** |
+| **not attempted** | `as_actor`가 필요한데 그 세션이 없었다. "못 찾음"이 아니라 "안 찾아봄" |
+
+`not attempted`는 recall 분모에서 빠지고 따로 보고된다 — 세션을 안 준 것을 탐지
+실패로 세면 에이전트가 억울하다. 대신 하나라도 있으면 종료 코드가 0이 아니다.
+
+`must_not_detect` 매칭은 **경로까지 본다.** 키워드만 보면 멀쩡한 `/lookup`에 낸
+injection 오탐이 진짜 `/search` SQLi를 찾은 것으로 계상됐다 — 함정이 잡으려던 바로
+그것에 점수를 주고 있었다 (테스트로 고정).
 
 정답지에 매칭되지 않은 finding은 **false positive가 아니라 `unexpected`(수동 트리아지
 대상)** 로 분류한다. 타겟이 정답지에 안 적힌 것을 노출할 수도 있으므로(예: robots.txt),
@@ -561,24 +581,38 @@ python -m dast_harness.validate --json          # 기계용 (stdout은 순수 JS
 ### 실측 결과 (nuclei v3.11.1 + nikto 2.6.1, 기본 설정 전체 템플릿)
 
 ```
-detected 7/7 documented weaknesses (recall 100%)
+$ python -m dast_harness.validate -s nuclei,nikto
 
-  [x] exposed-dotenv            /.env          nikto, nuclei
-  [x] exposed-git-config        /.git/config   nikto, nuclei
-  [x] exposed-db-backup         /backup.sql    nikto
-  [x] phpinfo-disclosure        /phpinfo.php   nikto
-  [x] directory-listing         /uploads/      nikto
-  [x] exposed-admin-panel       /admin/        nikto
-  [x] missing-security-headers  /              nikto, nuclei
+detected 7/9 attempted weaknesses (recall 78%)  —  1 not attempted
 
-unexpected findings (manual triage needed): 16  [high: 1, info: 10, low: 1, medium: 1, unknown: 3]
+  [x] exposed-dotenv             /.env          nikto, nuclei
+  [x] exposed-git-config         /.git/config   nikto, nuclei
+  [x] exposed-db-backup          /backup.sql    nikto
+  [x] phpinfo-disclosure         /phpinfo.php   nikto
+  [x] directory-listing          /uploads/      nikto
+  [x] exposed-admin-panel        /admin/        nikto
+  [x] missing-security-headers   /              nikto, nuclei
+  [ ] user-enumeration-login     /login         MISSED
+  [ ] sqli-error-based-search-q  /search        MISSED
+  [-] idor-order-object-access   /api/orders/1002 NOT ATTEMPTED (needs actor 'alice')
+
+unexpected findings (manual triage needed): 17  [high: 1, info: 11, low: 1, medium: 1, unknown: 3]
 ```
 
-recall은 100%지만 **정답지 7개 중 4개는 nikto 단독 탐지**였다. 스캐너 하나로는
-같은 수치가 나오지 않는다 — 다중 스캐너 하네스를 만든 이유가 여기서 수치로 확인된다.
+**이 78%가 이 프로젝트의 존재 이유다.** 파일 노출류 7개는 스캐너가 전부 잡지만,
+나머지 3개(사용자 열거·SQL 주입·IDOR)는 **원리적으로 못 잡는다** — 셋 다 "정상 응답과
+비교해야" 판정되는 것이라 대조가 필요하고, 그게 에이전트의 몫이다. IDOR은 로그인
+세션까지 필요해서 아예 `not attempted`로 빠진다 (`--auth` 없이 돌렸으므로).
 
-`unexpected` 16건을 직접 트리아지한 결과 네 부류였고, 자동으로 오탐이라 부르지
-않은 이유가 그대로 드러난다.
+> 예전 README는 여기 `7/7 recall 100%`로 적혀 있었다. 그때는 정답지가 파일 노출
+> 7개뿐이었고, 에이전트가 노릴 3개를 나중에 추가하면서 숫자만 갱신이 안 됐다.
+> 100%는 **정답지를 스캐너가 잘하는 것만으로 채웠을 때의 100%**였다.
+
+파일 노출 7개만 놓고 보면 **4개는 nikto 단독 탐지**였다. 스캐너 하나로는 같은 수치가
+나오지 않는다 — 다중 스캐너 하네스를 만든 이유가 여기서 수치로 확인된다.
+
+`unexpected`를 직접 트리아지한 결과 네 부류였고(아래는 16건이던 시점의 기록),
+자동으로 오탐이라 부르지 않은 이유가 그대로 드러난다.
 
 | 부류 | 건수 | 예시 | 판정 |
 |---|---|---|---|
