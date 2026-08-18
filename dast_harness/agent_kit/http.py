@@ -124,14 +124,18 @@ class AgentHttpClient:
         MFA가 걸린 실제 대상에서는 로그인 자동화가 아예 불가능하므로, 이 경로가
         자동 로그인보다 오히려 본체다.
         """
-        host = urlparse(url).hostname or ""
+        # 호스트를 그대로 쓰면 안 된다. cookiejar는 점 없는 이름을 `localhost`가
+        # 아니라 `localhost.local`로 취급해서, 도메인이 안 맞는 쿠키를 **조용히
+        # 안 보낸다.** 그러면 세션이 멀쩡한데 verify가 401로 떨어진다.
+        # 규칙을 베껴 쓰지 말고 stdlib가 쓰는 그 함수를 그대로 쓴다.
+        _, domain = http.cookiejar.eff_request_host(urllib.request.Request(url))
         jar = self._jars.get(actor)
         if jar is None:
             self._opener(actor)          # 항아리와 opener를 함께 만든다
             jar = self._jars[actor]
         jar.set_cookie(http.cookiejar.Cookie(
             version=0, name=name, value=value, port=None, port_specified=False,
-            domain=host, domain_specified=True, domain_initial_dot=False,
+            domain=domain, domain_specified=True, domain_initial_dot=False,
             path="/", path_specified=True, secure=False, expires=None,
             discard=True, comment=None, comment_url=None, rest={}, rfc2109=False,
         ))

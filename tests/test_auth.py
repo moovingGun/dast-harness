@@ -117,6 +117,21 @@ class EstablishTests(unittest.TestCase):
         self.assertTrue(results["bob"].ok, results["bob"].reason)
         self.assertEqual(client.actors, ["bob"])
 
+    def test_supplied_cookie_works_for_a_dotless_hostname(self):
+        # Regression: cookiejar treats a dotless host as "<host>.local", so a
+        # cookie stored under the bare hostname is silently never sent — the
+        # session is fine but verify fails 401. safety.py allows `localhost`
+        # by name, so this is a first-class target, not an edge case.
+        port = self.server.server_address[1]
+        client = AgentHttpClient()
+        results = establish(client, parse_actors({"actors": {"bob": {
+            "cookies": {"session": "bob-session"},
+            "verify": {"path": "/api/orders/1002", "expect_status": 200,
+                       "body_contains": "bob@example.com"}}}}),
+            "http://localhost:%d" % port)
+        self.assertTrue(results["bob"].ok, results["bob"].reason)
+        self.assertEqual(client.actors, ["bob"])
+
     def test_dead_session_fails_loudly(self):
         client, results = self._run({"actors": {"bob": {
             "cookies": {"session": "expired"},

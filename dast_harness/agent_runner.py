@@ -186,6 +186,10 @@ class AgentRunner:
             return _record(
                 ScanStatus.FAILED, started_at=started_at, finished_at=time.time(),
                 error=f"인증 실패로 실행하지 않음 ({reason})", auth=auth,
+                # 에이전트가 안 돌면 AgentCompletion이 없어서 blocked가 통째로
+                # 사라진다. 시나리오가 허가 범위 밖을 가리켰다는 증거를 여기서
+                # 버리면 안 된다.
+                blocked=client.blocked,
             )
 
         agent = agent_cls(client)
@@ -295,8 +299,9 @@ def _record(
     findings_count: int = 0,
     result: dict | None = None,
     auth: dict | None = None,
+    blocked: list | None = None,
 ) -> dict:
-    return {
+    record = {
         "status": status.value,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -307,6 +312,9 @@ def _record(
         # 물건이라, 리포트만 보고 구별할 수 있어야 한다.
         "auth": {name: r.to_dict() for name, r in (auth or {}).items()},
     }
+    if blocked:
+        record["blocked"] = [list(b) for b in blocked]
+    return record
 
 
 class CombinedRunner:
