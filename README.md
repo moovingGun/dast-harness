@@ -49,9 +49,10 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | **인증 시나리오** (`--auth`) — 로그인 재생 / 세션 주입 + 살아있음 확인 강제 |
 | ✅ | **씨앗 핸드오프** — 정찰 `request_seeds` → 뒤 에이전트의 `self.seeds` |
 | ✅ | **서브에이전트 통로** (`dast-harness probe`) — LLM이 안전 경계 안에서만 요청 |
+| ✅ | **서브에이전트 결과 게이트** (`dast-harness ingest`) — JSON → `AgentFinding` + 계약 검사 |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 330개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 352개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -116,6 +117,7 @@ dast_harness/
 │                        CombinedRunner로 스캐너 결과와 한 리포트에 합침
 ├── cli.py               one-shot CLI (python -m dast_harness scan)
 ├── probe.py             `dast-harness probe` — Claude 서브에이전트가 쓰는 요청 통로
+├── ingest.py            `dast-harness ingest` — 서브에이전트 JSON을 계약에 통과시켜 받음
 ├── validate.py          정답지 대비 탐지 정확도 채점
 └── reporters/           출력 전용 계층 (console, json)
 
@@ -345,6 +347,36 @@ echo '[
 
 출력의 `exchanges`는 그대로 `evidence.exchanges`에 넣을 수 있는 모양이다.
 `baseline_index`만 정하면 된다.
+
+### 결과는 `ingest`가 받는다
+
+`probe`가 요청 방향 통로라면 `ingest`는 **결과 방향 게이트**다. 서브에이전트가 쓴
+JSON을 그대로 믿지 않고 `AgentFinding`으로 복원해 계약을 검사한다.
+
+```bash
+dast-harness ingest findings.json                  # 계약 통과 → 리포트
+dast-harness ingest recon.json idor.json -f json   # 여러 에이전트를 한 리포트로
+```
+
+**입력 형식은 `AgentResult.to_dict()`와 같다.** 새 형식을 만들지 않은 이유는 Python
+에이전트가 내는 것과 서브에이전트가 내는 것이 같은 모양이어야 합쳐지기 때문이다.
+그래서 우리 에이전트 출력도 그대로 먹는다(왕복이 테스트로 고정돼 있다).
+
+복원이 검사를 겸한다 — `HttpExchange`를 다시 만들면 `__post_init__`이 **자격증명을
+다시 마스킹하고** excerpt를 자른다. 서브에이전트가 날 토큰을 붙여넣었어도 여기서
+가려진다.
+
+거부 메시지는 사람이 아니라 **LLM에게 돌려주는 수정 지시**다.
+
+```
+- category가 어휘 밖: 'access-control' (허용: exposure, information-disclosure,
+  misconfiguration, idor, injection)
+- scanner가 'idor' (기대: 'agent:idor')
+- 규칙4: agent_data에 남의 이름공간 침범 ['recon'] (허용: 'idor')
+```
+
+`severity: "hihg"` 같은 오타는 `unknown`으로 떨어뜨리지 않고 **거부한다** —
+조용히 강등하면 critical이 사라진다.
 
 ### 무엇이 거부되는가
 

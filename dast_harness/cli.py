@@ -19,7 +19,7 @@ import sys
 from .agent_kit.auth import AuthConfigError, load_actors
 from .agent_kit.recon import ReconAgent
 from .agent_runner import AgentRunner, CombinedRunner
-from . import probe
+from . import ingest, probe
 from .models import ScanConfig, Severity, Target
 from .orchestrator import MultiScanRunner
 from .reporters import ConsoleReporter, JSONReporter, build_report
@@ -56,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     probe.add_arguments(sub)
+    ingest.add_arguments(sub)
     scan = sub.add_parser("scan", help="scan a local/allowlisted target")
     scan.add_argument("url", help="target URL (http/https)")
     scan.add_argument(
@@ -188,6 +189,8 @@ def main(argv=None) -> int:
 
     if args.command == "probe":
         return probe.run(args)
+    if args.command == "ingest":
+        return ingest.run(args)
 
     option_error = _validate_options(args)
     if option_error is not None:
