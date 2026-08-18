@@ -50,7 +50,7 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | **씨앗 핸드오프** — 정찰 `request_seeds` → 뒤 에이전트의 `self.seeds` |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 311개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 316개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -361,6 +361,24 @@ Error  : recon: 인증 실패로 실행하지 않음 (bob: ...)
 
 `anon`은 예약된 이름이다 — 모든 에이전트가 대조군으로 쓰는 비로그인 신원이라
 시나리오에서 정의할 수 없다.
+
+### 크리덴셜은 스캔 대상 호스트에만 묶인다
+
+allowlist는 "이 호스트들을 스캔해도 된다"는 뜻이지 **"이 호스트들이 서로의
+크리덴셜을 가져도 된다"는 뜻이 아니다.** 주입한 헤더는 `--auth`를 걸 때의
+호스트에만 붙는다.
+
+```bash
+dast-harness scan http://a.internal --allow a.internal --allow b.internal \
+    -s agent:recon --auth actors.json
+#   a.internal → Authorization 붙음
+#   b.internal → 안 붙음
+```
+
+쿠키는 cookiejar가 도메인으로 묶어주므로 원래 안전했고, 헤더를 같은 기준에
+맞춘 것이다. 포트는 보지 않는다 — 쿠키와 같은 기준이고, 더 좁히면 같은 앱의 다른
+포트에서 인증이 **조용히** 빠진다. 한 actor를 두 호스트에 걸려고 하면 설정 실수로
+보고 거부한다.
 
 ## 리포팅 (reporters/)
 

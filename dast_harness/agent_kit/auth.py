@@ -241,7 +241,9 @@ def establish(
 def _establish_one(client: AgentHttpClient, actor: Actor, base: str) -> str:
     """성공이면 빈 문자열, 실패면 사람이 읽을 이유."""
     if actor.headers:
-        client.set_actor_headers(actor.name, actor.headers)
+        # 헤더는 base의 호스트에 묶인다 — allowlist에 다른 호스트가 있어도
+        # 이 actor의 토큰은 거기로 안 나간다.
+        client.set_actor_headers(actor.name, actor.headers, base)
     for cookie_name, value in actor.cookies.items():
         client.set_cookie(actor.name, cookie_name, value, base)
 
