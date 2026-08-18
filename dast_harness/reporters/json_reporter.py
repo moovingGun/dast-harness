@@ -35,6 +35,11 @@ class JSONReporter(Reporter):
             "findings_count": len(report.findings),
             "warnings_count": s.get("warnings_count", len(report.warnings)),
             "scanners": s.get("scanners"),  # per-scanner status/error/evidence
+            # Per-agent status plus each agent's own deliverable: coverage,
+            # completion, and recon's request_seeds — the hand-off input for the
+            # injection/IDOR agents. Findings are not repeated here; they are in
+            # "findings" like every other finding.
+            "agents": s.get("agents"),
             "findings": [self._finding_dict(f) for f in report.sorted_findings()],
             "warnings": report.warnings,
         }

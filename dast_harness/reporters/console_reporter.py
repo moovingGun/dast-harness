@@ -24,6 +24,20 @@ class ConsoleReporter(Reporter):
                     f"  - {name}: {st.get('status')} "
                     f"({st.get('findings_count', 0)} findings)"
                 )
+        # Per-agent breakdown. Coverage comes along because "0 findings" means
+        # nothing without "out of how many, and did it finish".
+        for name, st in (s.get("agents") or {}).items():
+            line = (
+                f"  - agent:{name}: {st.get('status')} "
+                f"({st.get('findings_count', 0)} findings"
+            )
+            coverage = (st.get("result") or {}).get("coverage") or {}
+            if coverage:
+                line += (
+                    f", {coverage.get('tested', 0)} "
+                    f"{coverage.get('unit', 'unit')} tested"
+                )
+            lines.append(line + ")")
 
         counts = report.severity_counts()
         summary = "  ".join(f"{sev}={n}" for sev, n in counts.items() if n)

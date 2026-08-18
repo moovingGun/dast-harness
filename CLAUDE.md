@@ -88,6 +88,7 @@ dast_harness/
                      #             http.py(HTTP) recon.py(복사할 골격)
   runner.py          # 단일 스캐너 생명주기
   orchestrator.py    # 다중 스캐너 병렬 + 롤업
+  agent_runner.py    # 러너의 형제 — 에이전트 순차 실행 + 스캐너 결과와 합치기
   reporters/         # console, json
   validate.py        # 정답지 대비 탐지 정확도 채점
 targets/vulnerable_app/   # 통제 취약 타겟 + ground_truth.json
