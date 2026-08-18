@@ -50,14 +50,24 @@ from dast_harness.agent_kit import Agent, AgentResult
 class IdorAgent(Agent):
     name = "idor"            # scanner 값이 "agent:idor"가 된다
     unit = "object-id"       # 뭘 세는 에이전트인가 (Coverage.unit)
+    wants_seeds = True       # 정찰의 request_seeds를 입력으로 받는다
 
     def run(self, base: str) -> AgentResult:
         ...                                  # 여기에 로직
         return self.finish(self.findings, tested=len(probed))
 ```
 
-구현할 것은 `run()` 하나다. `self.client`(HTTP)와 `self.findings`(빈 리스트)는
-부모가 준다.
+구현할 것은 `run()` 하나다. **생성자는 건드리지 않는다.** 부모가 세 가지를 준다.
+
+| | 무엇 |
+|---|---|
+| `self.client` | HTTP 통로. `client.actors`에 인증된 신원이 들어있다 |
+| `self.findings` | 찾는 대로 append 하는 빈 리스트 |
+| `self.seeds` | 앞서 돈 정찰이 만든 요청 씨앗 (§6) |
+
+`wants_seeds = True`로 두면 씨앗이 하나도 없을 때 러너가 **실행하지 않고 실패로
+세운다.** 0건 검사를 "완료"로 보고하면 리포트가 깨끗해 보이기 때문이다.
+정찰은 씨앗을 만드는 쪽이므로 `False`(기본값)다.
 
 `name`은 세 개 중 하나: `recon`, `injection`, `idor`.
 `unit`은 `object-id` / `parameter` / `endpoint` / `header` / `path` 중 하나.
@@ -301,14 +311,23 @@ class RequestParameter:
 **씨앗은 모양이 아니라 실제 요청이다.** 그대로 재생하고 한 부분만 바꾼다.
 무엇을 바꿀지는 `location`이 말한다 — `path`는 IDOR, `query`/`body`는 injection.
 
+**씨앗은 `self.seeds`로 들어온다.** 러너가 정찰을 먼저 돌리고 채워준다 —
+`recon.request_seeds`를 직접 import하거나 생성자로 받을 필요가 없다.
+
 ```python
 # IDOR: 경로 파라미터가 있는 씨앗만
-seeds = [s for s in recon.request_seeds
+seeds = [s for s in self.seeds
          if any(p.location == "path" for p in s.params)]
 
 # injection: 값을 넣을 수 있는 씨앗만
-seeds = [s for s in recon.request_seeds
+seeds = [s for s in self.seeds
          if any(p.location in ("query", "body") for p in s.params)]
+```
+
+CLI에서는 씨앗을 만드는 에이전트를 **앞에 같이 선택**해야 한다.
+
+```bash
+dast-harness scan URL -s agent:recon,agent:idor   # 정찰 → IDOR 순서로 돈다
 ```
 
 > **정찰을 기다리지 마라.** 위 모양으로 씨앗을 **가짜로 직접 만들어서** 진행하고,
@@ -332,28 +351,30 @@ class IdorAgent(Agent):
 
     name = "idor"
     unit = "object-id"
+    wants_seeds = True                    # 씨앗이 없으면 러너가 실행하지 않는다
 
-    def __init__(self, client, *, seeds=()):
-        super().__init__(client)
-        self.seeds = [s for s in seeds
-                      if any(p.location == "path" for p in s.params)]
+    def __init__(self, client):
+        super().__init__(client)          # self.seeds는 러너가 채운다
         self.tested = 0
         self.skipped = 0
         self.skip_reasons = {}
 
     def run(self, base):
+        # 경로 파라미터가 있는 씨앗만 고른다. IDOR이 겨누는 건 객체 id다.
+        targets = [s for s in self.seeds
+                   if any(p.location == "path" for p in s.params)]
         # 신원은 `--auth` 시나리오가 준다. **자격증명을 에이전트에 박지 마라** —
         # 대상마다 로그인 방식이 다르고, 박아두면 우리 연습 타겟에서만 돈다.
         # 여기 올라온 actor는 세션이 살아있음이 이미 확인된 것들이다.
         if not self.client.actors:
             # 세션이 없으면 판정 자체가 불가능하다. "못 찾음"이 아니라 "안 봄".
-            self.skip_reasons["no-auth-session"] = len(self.seeds)
+            self.skip_reasons["no-auth-session"] = len(targets)
             return self.finish(self.findings, tested=0,
-                               skipped=len(self.seeds),
+                               skipped=len(targets),
                                skip_reasons=self.skip_reasons)
 
         owner = self.client.actors[0]
-        for seed in self.seeds:
+        for seed in targets:
             self._probe(seed, owner)
 
         return self.finish(self.findings, tested=self.tested,
@@ -428,7 +449,9 @@ recon = ReconAgent(AgentHttpClient(allowlist=set(), max_requests=200)).run(BASE)
 
 client = AgentHttpClient(allowlist=set(), max_requests=200)
 establish(client, load_actors("targets/vulnerable_app/actors.json"), BASE)
-result = IdorAgent(client, seeds=recon.request_seeds).run(BASE)
+agent = IdorAgent(client)
+agent.seeds = recon.request_seeds        # CLI에서는 러너가 이걸 해준다
+result = agent.run(BASE)
 ```
 
 CLI로 돌릴 때는 `establish()`를 직접 부를 일이 없다 — `--auth`를 주면 러너가

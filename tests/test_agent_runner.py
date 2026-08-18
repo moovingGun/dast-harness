@@ -9,9 +9,11 @@ import threading
 import unittest
 
 from dast_harness import Finding, MultiScanRunner, ScanConfig, ScanOutcome, ScanStatus, Severity, Target
-from dast_harness.agent_kit import AgentFinding, Confidence, Evidence, HttpExchange, Probe
+from dast_harness.agent_kit import (AgentFinding, Confidence, Evidence, HttpExchange,
+                                    Probe, ReconResult, RequestParameter, RequestSeed)
 from dast_harness.agent_kit.auth import parse_actors
 from dast_harness.agent_kit.base import Agent
+from dast_harness.agent_kit.recon import ReconAgent
 from dast_harness.agent_runner import AgentRunner, CombinedRunner
 from dast_harness.reporters import ConsoleReporter, JSONReporter, build_report
 from dast_harness.safety import TargetNotAuthorizedError
@@ -163,6 +165,106 @@ class AgentRunnerTests(unittest.TestCase):
         runner = AgentRunner([QuietAgent])
         with self.assertRaises(KeyError):
             runner.get_status("nope")
+
+
+def _seed(path, value="1"):
+    return RequestSeed(
+        method="GET", url=f"{LOCAL}{path}/{value}",
+        params=(RequestParameter(name="id", location="path", value=value,
+                                 type="int"),),
+        observed_status=200,
+    )
+
+
+class SeedProducer(Agent):
+    name = "producer"
+    unit = "endpoint"
+    result_cls = ReconResult
+    emits = ()
+
+    def run(self, base: str):
+        return self.finish([], tested=1, request_seeds=list(self.emits))
+
+
+class SecondProducer(SeedProducer):
+    name = "producer2"
+
+
+class SeedConsumer(Agent):
+    """Records what the runner handed it, so the assertion is on real input."""
+
+    name = "consumer"
+    unit = "object-id"
+    wants_seeds = True
+    received = ()
+
+    def run(self, base: str):
+        type(self).received = tuple(self.seeds)
+        return self.finish([], tested=len(self.seeds))
+
+
+class SeedHandoffTests(unittest.TestCase):
+    """Recon's request_seeds must reach the agents that consume them.
+
+    This is the whole reason agents got a sibling runner instead of a Scanner
+    adapter, and the reason they run in order. Wiring it up was missed once:
+    a correct IDOR agent plugged into the CLI reported "0 tested, completed".
+    """
+
+    def setUp(self):
+        SeedConsumer.received = ()
+        SeedProducer.emits = (_seed("/api/orders", "1001"),)
+
+    def _run(self, agents):
+        runner = AgentRunner(agents)
+        scan_id = runner.start_scan(Target(LOCAL))
+        runner.wait(scan_id, timeout=5)
+        return runner, scan_id
+
+    def test_seeds_reach_the_next_agent(self):
+        runner, scan_id = self._run([SeedProducer, SeedConsumer])
+        self.assertEqual([s.url for s in SeedConsumer.received],
+                         [f"{LOCAL}/api/orders/1001"])
+        agents = runner.get_status(scan_id)["agents"]
+        self.assertEqual(agents["consumer"]["result"]["coverage"]["tested"], 1)
+
+    def test_consumer_without_seeds_fails_instead_of_reporting_clean(self):
+        runner, scan_id = self._run([SeedConsumer])
+        record = runner.get_status(scan_id)["agents"]["consumer"]
+        self.assertEqual(record["status"], "failed")
+        # The message has to say what to do, not just that something is missing.
+        self.assertIn("agent:recon", record["error"])
+        self.assertTrue(any("씨앗" in w for w in runner.get_warnings(scan_id)))
+
+    def test_order_decides_the_handoff(self):
+        # Consumer first: nothing has produced seeds yet, so it must fail
+        # rather than quietly test zero objects.
+        runner, scan_id = self._run([SeedConsumer, SeedProducer])
+        agents = runner.get_status(scan_id)["agents"]
+        self.assertEqual(agents["consumer"]["status"], "failed")
+        self.assertEqual(agents["producer"]["status"], "completed")
+
+    def test_seeds_from_several_producers_are_deduped(self):
+        SeedProducer.emits = (_seed("/api/orders", "1001"),)
+        SecondProducer.emits = (_seed("/api/orders", "1002"),   # same template
+                                _seed("/api/carts", "5"))       # new template
+        self._run([SeedProducer, SecondProducer, SeedConsumer])
+        self.assertEqual(
+            sorted(s.template for s in SeedConsumer.received),
+            ["/api/carts/{id}", "/api/orders/{id}"],
+        )
+
+    def test_recon_still_collects_under_the_runner(self):
+        # Regression: the base class assigns `self.seeds`, which collided with
+        # the name ReconAgent used for its own accumulator and silently emptied
+        # it. Recon is the producer — if it breaks, nothing downstream runs.
+        runner = AgentRunner([ReconAgent])
+        scan_id = runner.start_scan(Target(LOCAL))
+        runner.wait(scan_id, timeout=10)
+        record = runner.get_status(scan_id)["agents"]["recon"]
+        # No server here, so the crawl finds nothing — but it must not raise.
+        self.assertEqual(record["status"], "completed", record["error"])
+        self.assertIn("request_seeds", record["result"])
 
 
 class AuthWiringTests(unittest.TestCase):

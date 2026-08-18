@@ -47,9 +47,10 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | 리포터에 에이전트 필드(`confidence`/`evidence`/`agent_data`) 반영 |
 | ✅ | 에이전트를 CLI에 꽂는 배관 (`-s agent:recon`) — 중단은 에이전트 경계에서만 |
 | ✅ | **인증 시나리오** (`--auth`) — 로그인 재생 / 세션 주입 + 살아있음 확인 강제 |
+| ✅ | **씨앗 핸드오프** — 정찰 `request_seeds` → 뒤 에이전트의 `self.seeds` |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 304개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 311개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -254,6 +255,32 @@ AGENTS = {"recon": ReconAgent, "idor": IdorAgent}
 걸려서지만, 에이전트는 인프로세스이고 정찰 → injection/IDOR로 씨앗을 넘기는 순서가
 어차피 필요하다. 클라이언트는 에이전트마다 새로 만든다 — 하나를 공유하면
 `requests_made`와 `blocked`가 앞 에이전트 것까지 합산돼 계약이 조용히 거짓이 된다.
+
+### 씨앗 핸드오프 (A → B, C)
+
+정찰이 만든 `request_seeds`가 뒤에 도는 에이전트의 `self.seeds`로 들어간다.
+**`Scanner` 어댑터를 쓰지 않은 이유가 이 채널이다.** `-s`에 적은 순서대로 돈다.
+
+```bash
+dast-harness scan URL -s agent:recon,agent:idor    # 정찰이 먼저, IDOR이 그 씨앗을 받는다
+```
+
+받는 쪽은 클래스 속성 하나만 켠다. 생성자는 안 고친다 (`client.actors`와 같은 방식).
+
+```python
+class IdorAgent(Agent):
+    wants_seeds = True                 # 씨앗이 없으면 러너가 실행하지 않는다
+```
+
+`wants_seeds`가 켜져 있는데 씨앗이 하나도 없으면 **실행하지 않고 실패로 세운다.**
+그냥 돌리면 "0건 검사, 0건 발견"이 `completed`로 나가는데, 리포트만 보면 깨끗해
+보이지만 실은 아무것도 안 본 것이다. `verify`를 필수로 만든 것과 같은 이유다.
+
+```
+  - agent:idor: failed (0 findings)
+Error  : idor: 검사할 요청 씨앗이 없다. 씨앗을 만드는 에이전트를 앞에 같이
+         선택할 것 (예: -s agent:recon,agent:idor)
+```
 
 에이전트별 산출물(`coverage`/`completion`/`request_seeds`)은 상태의 `agents` 키로,
 findings는 스캐너와 같은 공용 채널로 나간다. **같은 finding을 두 곳에 싣지 않는다.**
