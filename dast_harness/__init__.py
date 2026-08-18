@@ -18,6 +18,7 @@ from .orchestrator import MultiScanRunner
 from .runner import ScanRunner
 from .safety import TargetNotAuthorizedError, authorize_target
 from .scanners.base import ScannerExecutionError
+from .scanners.ffuf import FfufScanner
 from .scanners.nikto import NiktoScanner
 from .scanners.nuclei import NucleiScanner
 
@@ -37,6 +38,7 @@ __all__ = [
     "ScannerExecutionError",
     "NucleiScanner",
     "NiktoScanner",
+    "FfufScanner",
     "authorize_target",
     "TargetNotAuthorizedError",
     "Reporter",

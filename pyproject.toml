@@ -30,3 +30,7 @@ version = { attr = "dast_harness.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["dast_harness*"]
+
+[tool.setuptools.package-data]
+# ffuf 어댑터의 기본 워드리스트. 설치본에서도 -w 로 가리킬 수 있어야 한다.
+"dast_harness.scanners" = ["wordlists/*.txt"]

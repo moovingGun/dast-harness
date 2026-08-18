@@ -24,11 +24,13 @@ from .models import ScanConfig, Severity, Target
 from .orchestrator import MultiScanRunner
 from .reporters import ConsoleReporter, JSONReporter, build_report
 from .safety import TargetNotAuthorizedError
+from .scanners.ffuf import FfufScanner
 from .scanners.nikto import NiktoScanner
 from .scanners.nuclei import NucleiScanner
 
 # name -> factory. Tests monkeypatch this to inject fakes.
-SCANNERS = {"nuclei": NucleiScanner, "nikto": NiktoScanner}
+SCANNERS = {"nuclei": NucleiScanner, "nikto": NiktoScanner,
+            "ffuf": FfufScanner}
 
 # Agents are selected through the same --scanner flag, prefixed with AGENT_PREFIX
 # ("-s agent:recon"). That prefix is not a CLI invention: the finding contract
