@@ -199,3 +199,202 @@ class ValidateCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+TRAPS = [
+    {
+        "id": "lookup-not-injectable",
+        "path": "/lookup",
+        "category": "injection",
+        "description": "sound endpoint that looks injectable",
+        "match_any": ["sqli", "sql injection", "injection"],
+    }
+]
+
+INJECTABLE = [
+    _entry("sqli-error-based-search-q", "/search", ["sqli", "sql injection"],
+           category="injection"),
+]
+
+
+class FalsePositiveTest(unittest.TestCase):
+    """`must_not_detect` endpoints are documented as sound. Reporting one is
+    wrong, and must not be scored as a detection of something else."""
+
+    def test_a_finding_on_a_trap_endpoint_is_a_false_positive(self):
+        finding = _finding("SQL injection", finding_id="sql-injection-in-q",
+                           matched_at="http://127.0.0.1:8080/lookup?q=x")
+        report = validate.score([finding], INJECTABLE, must_not_detect=TRAPS)
+        self.assertEqual([f.finding_id for f in report.false_positives],
+                         ["sql-injection-in-q"])
+
+    def test_a_trap_finding_is_not_credited_to_a_real_entry(self):
+        # The regression this exists for: keyword matching alone credited an
+        # injection report at the sound /lookup to the real /search SQLi, so the
+        # trap rewarded exactly what it was written to catch.
+        finding = _finding("SQL injection", finding_id="sql-injection-in-q",
+                           matched_at="http://127.0.0.1:8080/lookup?q=x")
+        report = validate.score([finding], INJECTABLE, must_not_detect=TRAPS)
+        self.assertEqual([e.id for e in report.entries if e.detected], [])
+        self.assertEqual(report.recall, 0.0)
+
+    def test_the_same_keywords_at_the_documented_path_still_count(self):
+        finding = _finding("SQL injection", finding_id="sqli-error",
+                           matched_at="http://127.0.0.1:8080/search?q=x")
+        report = validate.score([finding], INJECTABLE, must_not_detect=TRAPS)
+        self.assertEqual(report.false_positives, [])
+        self.assertEqual([e.id for e in report.entries if e.detected],
+                         ["sqli-error-based-search-q"])
+
+    def test_a_trap_path_finding_with_other_keywords_is_not_a_false_positive(self):
+        # Being *at* the endpoint is not the offence; claiming the documented
+        # weakness class there is.
+        finding = _finding("Missing security header", finding_id="headers",
+                           matched_at="http://127.0.0.1:8080/lookup")
+        report = validate.score([finding], INJECTABLE, must_not_detect=TRAPS)
+        self.assertEqual(report.false_positives, [])
+        self.assertEqual(len(report.unexpected), 1)
+
+    def test_false_positives_fail_the_run(self):
+        finding = _finding("SQL injection", finding_id="sqli",
+                           matched_at="http://127.0.0.1:8080/lookup")
+        report = validate.score([finding], INJECTABLE, must_not_detect=TRAPS)
+        self.assertTrue(report.false_positives)
+        self.assertIn("FALSE POSITIVES", validate.render(report))
+
+    def test_directory_entries_cover_paths_below_them(self):
+        traps = [{"id": "uploads-fine", "path": "/uploads/",
+                  "match_any": ["listing"]}]
+        finding = _finding("directory listing", finding_id="dir",
+                           matched_at="http://127.0.0.1:8080/uploads/sub/x")
+        report = validate.score([finding], [], must_not_detect=traps)
+        self.assertEqual(len(report.false_positives), 1)
+
+
+AUTHED = [
+    dict(_entry("idor-order", "/api/orders/1002", ["idor"], category="idor"),
+         as_actor="alice"),
+]
+
+
+class NotAttemptedTest(unittest.TestCase):
+    """"안 찾아봄"과 "못 찾음"은 다르다. A weakness that needs a session nobody
+    had is a setup gap, not a detection failure."""
+
+    def test_entry_needing_an_actor_without_a_session_is_not_attempted(self):
+        report = validate.score([], AUTHED)
+        self.assertEqual([e.id for e in report.not_attempted()], ["idor-order"])
+        self.assertEqual(report.missed(), [])
+
+    def test_not_attempted_entries_are_excluded_from_recall(self):
+        # Folding them in would read as "the agent failed" when the run never
+        # gave it a chance.
+        entries = AUTHED + [_entry("exposed-dotenv", "/.env", ["dotenv"])]
+        found = _finding("dotenv", finding_id="dotenv",
+                         matched_at="http://127.0.0.1:8080/.env")
+        report = validate.score([found], entries)
+        self.assertEqual(len(report.attempted), 1)
+        self.assertEqual(report.recall, 1.0)
+        self.assertIn("not attempted", validate.render(report))
+
+    def test_a_live_session_makes_it_attempted(self):
+        report = validate.score([], AUTHED, actors=frozenset({"alice"}))
+        self.assertEqual(report.not_attempted(), [])
+        self.assertEqual([e.id for e in report.missed()], ["idor-order"])
+
+    def test_detection_beats_the_actor_bookkeeping(self):
+        # If it was found, it was obviously attempted, whatever we think we know
+        # about sessions.
+        found = _finding("idor", finding_id="idor",
+                         matched_at="http://127.0.0.1:8080/api/orders/1002")
+        report = validate.score([found], AUTHED)
+        self.assertEqual(report.not_attempted(), [])
+        self.assertEqual(report.recall, 1.0)
+
+
+class IngestScoringTest(unittest.TestCase):
+    """`--ingest` grades a result a subagent already produced."""
+
+    def setUp(self):
+        truth = {"target": "http://127.0.0.1:8080",
+                 "expected": INJECTABLE + AUTHED, "must_not_detect": TRAPS}
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(truth, fh)
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        self.truth_path = fh.name
+
+    def _result_file(self, findings):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump({"agent": "idor", "findings": findings,
+                   "coverage": {"unit": "object-id", "tested": len(findings)},
+                   "completion": {"requests_made": 3}}, fh, ensure_ascii=False)
+        fh.close()
+        self.addCleanup(os.unlink, fh.name)
+        return fh.name
+
+    @staticmethod
+    def _agent_finding(finding_id, name, category, matched_at, actor="alice"):
+        exchange = {"method": "GET", "url": matched_at, "status": 200,
+                    "actor": actor, "response_excerpt": "x"}
+        return {
+            "scanner": "agent:idor", "id": finding_id, "name": name,
+            "severity": "high", "confidence": "confirmed", "category": category,
+            "matched_at": matched_at, "description": "d", "tags": [],
+            "evidence": {"baseline_index": 0, "rationale": "r",
+                         "exchanges": [exchange]},
+            "agent_data": {"idor": {"strategy": "s", "target": "id",
+                                    "target_kind": "object-id"}},
+        }
+
+    def _run(self, path, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = validate.main(["--ground-truth", self.truth_path,
+                                  "--ingest", path, *extra])
+        return code, out.getvalue()
+
+    def test_a_correct_agent_result_scores_a_detection(self):
+        path = self._result_file([self._agent_finding(
+            "idor-order-object-access", "ownership missing", "idor",
+            "http://127.0.0.1:8080/api/orders/1002")])
+        code, text = self._run(path)
+        self.assertIn("[x] idor-order", text)
+        self.assertEqual(code, validate.EXIT_MISSED)   # the /search SQLi is still missed
+
+    def test_evidence_actors_decide_what_was_attempted(self):
+        # A saved result has no live session to ask, so the exchanges are the
+        # only honest source for "could this even be tried".
+        path = self._result_file([self._agent_finding(
+            "sqli-error", "sql injection", "injection",
+            "http://127.0.0.1:8080/search?q=x", actor="alice")])
+        _, text = self._run(path)
+        self.assertNotIn("NOT ATTEMPTED", text)
+
+    def test_a_trap_finding_is_scored_as_a_false_positive(self):
+        path = self._result_file([self._agent_finding(
+            "sql-injection-in-lookup", "sql injection", "injection",
+            "http://127.0.0.1:8080/lookup?q=x")])
+        code, text = self._run(path)
+        self.assertIn("FALSE POSITIVES", text)
+        self.assertEqual(code, validate.EXIT_MISSED)
+
+    def test_a_result_failing_the_contract_is_not_scored(self):
+        # Grading a malformed finding would report accuracy for something the
+        # harness would never have accepted in the first place.
+        bad = self._agent_finding("x", "n", "idor",
+                                  "http://127.0.0.1:8080/api/orders/1002")
+        bad["scanner"] = "idor"            # missing the agent: prefix
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, text = self._run(self._result_file([bad]))
+        self.assertEqual(code, validate.EXIT_USAGE)
+        self.assertEqual(text, "")
+        self.assertIn("agent:", err.getvalue())
+
+    def test_ingest_and_scanner_selection_are_mutually_exclusive(self):
+        path = self._result_file([])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _ = self._run(path, "-s", "fake")
+        self.assertEqual(code, validate.EXIT_USAGE)
