@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+  # No base-branch filter on purpose. With `branches: [main]` a PR stacked on
+  # another PR ran no tests at all — the checks list showed only third-party
+  # reviewers, which reads as "CI passed" at a glance. A bug that the suite
+  # would have caught reached review that way.
+  # `push` stays pinned to main so branch pushes don't duplicate the PR run.
   pull_request:
-    branches: [main]
 
 jobs:
   test:
