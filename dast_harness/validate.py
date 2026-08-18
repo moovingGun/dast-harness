@@ -222,14 +222,24 @@ def _false_positive(finding: Finding, traps: list[dict]) -> dict | None:
 def _match(finding: Finding, expected: list[dict]) -> dict | None:
     """The ground-truth entry a finding evidences, or None.
 
-    Matching is keyword-based on the finding's id and name. The first entry in
-    ground-truth order wins, so files must list specific weaknesses before
-    generic ones; a finding never credits two entries.
+    A finding credits an entry only when **both** hold: its id/name contains one
+    of the entry's keywords, *and* it was observed at that entry's path. The
+    first entry in ground-truth order wins, so files must list specific
+    weaknesses before generic ones; a finding never credits two entries.
+
+    The path check is not decoration. Keyword matching alone credited nuclei's
+    `chamilo-lms-sqli` — fired at `/main/inc/ajax/extra_field.ajax.php`, a path
+    this target does not serve — to the documented `/search` SQL injection,
+    because both contain "sqli". That inflates recall with a finding about a
+    different product at a nonexistent URL.
     """
     haystack = f"{finding.finding_id} {finding.name}".lower()
     for entry in expected:
-        if any(keyword in haystack for keyword in entry["match_any"]):
-            return entry
+        if not any(keyword in haystack for keyword in entry["match_any"]):
+            continue
+        if not _at_path(finding, entry["path"]):
+            continue
+        return entry
     return None
 
 

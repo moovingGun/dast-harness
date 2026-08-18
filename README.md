@@ -49,8 +49,8 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | 통제 취약 타겟 + 정답지, 스캐너 탐지 정확도 채점 |
 | ✅ | **에이전트 결과 계약** — `AgentFinding`/`AgentResult`/`RequestSeed` + 검증기 |
 | ✅ | **정찰 에이전트** — 크롤 + 폼 파싱 → 요청 씨앗 인벤토리 |
-| ⬜ | injection 에이전트 ← 팀원 작업 |
-| ⬜ | IDOR 에이전트 ← 팀원 작업 |
+| ✅ | **injection 에이전트** — 구문 깨기 + 주석 복구로 판정 (`agent_kit/injection/`) |
+| ✅ | **IDOR 에이전트** — 자기 것/남의 것/비로그인 3단 (`agent_kit/idor/`) |
 | ✅ | 리포터에 에이전트 필드(`confidence`/`evidence`/`agent_data`) 반영 |
 | ✅ | 에이전트를 CLI에 꽂는 배관 (`-s agent:recon`) — 중단은 에이전트 경계에서만 |
 | ✅ | **인증 시나리오** (`--auth`) — 로그인 재생 / 세션 주입 + 살아있음 확인 강제 |
@@ -59,7 +59,7 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ✅ | **서브에이전트 결과 게이트** (`dast-harness ingest`) — JSON → `AgentFinding` + 계약 검사 |
 | ✅ | **에이전트 findings 채점** + 오탐(`must_not_detect`) 채점 + `--ingest` |
 
-테스트 385개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 418개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -114,8 +114,14 @@ dast_harness/
 │   ├── http.py       📖 AgentHttpClient — 에이전트가 쓸 수 있는 유일한 HTTP 통로
 │   ├── auth.py       📖 인증 시나리오 — 로그인 재생 / 세션 주입 / 살아있음 확인
 │   └── recon.py      📖 동작하는 정찰 에이전트. **이걸 복사해서 시작한다**
-│      ✍️ idor.py         ← IDOR 담당자가 여기에 추가
-│      ✍️ injection.py    ← injection 담당자가 여기에 추가
+│   ├── injection/     📖 injection 에이전트 — **폴더째 떼어낼 수 있다**
+│   │   ├── agent.py       판정 로직 (정상 → 구문 깨기 → 주석 복구)
+│   │   ├── payloads.py    ✍️ 페이로드·오류 시그니처 고치는 곳
+│   │   └── README.md
+│   └── idor/          📖 IDOR 에이전트 — **폴더째 떼어낼 수 있다**
+│       ├── agent.py       판정 로직 (자기 것 → 남의 것 → 비로그인)
+│       ├── strategies.py  ✍️ id 변형 방식 고치는 곳
+│       └── README.md
 │
 ├── runner.py            단일 스캐너 생명주기: start_scan/get_status/get_results/
 │                        stop_scan/wait
