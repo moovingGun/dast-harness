@@ -139,10 +139,10 @@ class ReconFormParsingTest(unittest.TestCase):
             f"{ORIGIN}/checkout",
             '<form onsubmit="return a>b" method="post" action="/pay">'
             '<input name="amount" value="10"></form>')
-        self.assertEqual(list(agent.seeds), [("POST", "/pay")])
+        self.assertEqual(list(agent._collected), [("POST", "/pay")])
         self.assertEqual(
             [(p.name, p.location)
-             for p in agent.seeds[("POST", "/pay")].params],
+             for p in agent._collected[("POST", "/pay")].params],
             [("amount", "body")])
 
 
@@ -230,12 +230,12 @@ class ReconSeedMergeTest(unittest.TestCase):
                 params=(RequestParameter(name="id", location="path",
                                          value=value, type="int"),),
                 observed_status=200))
-        self.assertEqual(len(agent.seeds), 1)
-        seed = next(iter(agent.seeds.values()))
+        self.assertEqual(len(agent._collected), 1)
+        seed = next(iter(agent._collected.values()))
         path_value = next(p.value for p in seed.params if p.location == "path")
         self.assertIn(path_value, seed.url)
         # ...and the seed still matches the key it is stored under.
-        self.assertEqual(("GET", seed.template), next(iter(agent.seeds)))
+        self.assertEqual(("GET", seed.template), next(iter(agent._collected)))
 
 
 if __name__ == "__main__":

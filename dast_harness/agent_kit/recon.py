@@ -96,7 +96,9 @@ class ReconAgent(Agent):
     def __init__(self, client: AgentHttpClient, *, max_pages: int = 40) -> None:
         super().__init__(client)
         self.max_pages = max_pages
-        self.seeds: dict[tuple[str, str], RequestSeed] = {}   # (method, template) -> seed
+        # 수집 중인 씨앗. `self.seeds`는 부모가 **받는 쪽** 입력으로 쓰므로
+        # (정찰은 만드는 쪽이라 비어 있다) 이름을 겹치지 않게 둔다.
+        self._collected: dict[tuple[str, str], RequestSeed] = {}  # (method, template) -> seed
         self.exchanges: dict[str, object] = {}   # url -> HttpExchange (증거 재사용)
         # url -> 잘리지 않은 본문. exchange.response_excerpt는 증거용으로 잘려
         # 있으므로 파싱에 쓰면 경계 뒤의 폼이 조용히 사라진다.
@@ -110,9 +112,9 @@ class ReconAgent(Agent):
         뒤덮인다. template으로 묶고 파라미터만 누적한다.
         """
         key = (seed.method, seed.template)
-        prev = self.seeds.get(key)
+        prev = self._collected.get(key)
         if prev is None:
-            self.seeds[key] = seed
+            self._collected[key] = seed
             return
 
         # `url`과 `location="path"` 파라미터는 한 쌍이다. 따로 합치면
@@ -129,7 +131,7 @@ class ReconAgent(Agent):
         non_path.update({(p.name, p.location): p
                          for p in seed.params if p.location != "path"})
 
-        self.seeds[key] = replace(
+        self._collected[key] = replace(
             primary,
             params=tuple(p for p in primary.params if p.location == "path")
                    + tuple(non_path.values()),
@@ -311,7 +313,7 @@ class ReconAgent(Agent):
         return self.finish(
             self.findings,
             tested=len(self.exchanges),
-            request_seeds=sorted(self.seeds.values(),
+            request_seeds=sorted(self._collected.values(),
                                  key=lambda s: (s.template, s.method)),
         )
 

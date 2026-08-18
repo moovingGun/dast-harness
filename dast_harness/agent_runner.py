@@ -129,6 +129,9 @@ class AgentRunner:
         stop_event: threading.Event,
     ) -> None:
         state.mark_running(time.time())
+        # A → B, C 핸드오프. 정찰이 만든 요청 씨앗이 여기 쌓이고, 뒤에 도는
+        # 에이전트가 `self.seeds`로 받는다. 에이전트를 순차로 도는 이유가 이거다.
+        seeds: list = []
         for agent_cls in self.agents:
             if stop_event.is_set():
                 # 중단은 에이전트 경계에서만 듣는다. 안 돈 에이전트는 안 돌았다고
@@ -138,7 +141,8 @@ class AgentRunner:
                     error="중단 요청으로 실행되지 않음",
                 )
             else:
-                record = self._run_one(agent_cls, state, config)
+                record = self._run_one(agent_cls, state, config, seeds)
+                _merge_seeds(seeds, record.pop("_seeds", ()))
             with self._lock:
                 self._records[scan_id][agent_cls.name] = record
 
@@ -156,7 +160,11 @@ class AgentRunner:
         )
 
     def _run_one(
-        self, agent_cls: type[Agent], state: ScanState, config: ScanConfig
+        self,
+        agent_cls: type[Agent],
+        state: ScanState,
+        config: ScanConfig,
+        seeds: list,
     ) -> dict:
         """에이전트 하나를 돌리고 그 결과를 상태에 흘린다.
 
@@ -192,7 +200,24 @@ class AgentRunner:
                 blocked=client.blocked,
             )
 
+        if agent_cls.wants_seeds and not seeds:
+            # 씨앗 없이 돌면 "0건 검사, 0건 발견"을 completed로 보고한다. 리포트만
+            # 보면 깨끗해 보이는데 실은 아무것도 안 본 것이다 — 인증 실패와 같은
+            # 부류의 거짓말이라 같은 방식으로 세운다.
+            reason = (
+                f"검사할 요청 씨앗이 없다. 씨앗을 만드는 에이전트를 앞에 같이 "
+                f"선택할 것 (예: -s agent:recon,agent:{agent_cls.name})"
+            )
+            state.add_warning(f"[agent:{agent_cls.name}] {reason}")
+            return _record(
+                ScanStatus.FAILED, started_at=started_at, finished_at=time.time(),
+                error=reason, auth=auth,
+            )
+
         agent = agent_cls(client)
+        # `client.actors`와 같은 방식으로 준다 — 에이전트 생성자를 통일해 두면
+        # 러너가 에이전트마다 다른 시그니처를 알 필요가 없다.
+        agent.seeds = tuple(seeds)
         try:
             result = agent.run(state.target.url)
         except Exception as exc:  # noqa: BLE001 - 계약 위반도 네트워크 실패도 여기로
@@ -213,10 +238,14 @@ class AgentRunner:
         # finding을 리포트 두 곳에 싣지 않는다.
         payload = result.to_dict()
         findings_count = len(payload.pop("findings", []))
-        return _record(
+        record = _record(
             ScanStatus.COMPLETED, started_at=started_at, finished_at=time.time(),
             findings_count=findings_count, result=payload, auth=auth,
         )
+        # 뒤 에이전트에게 넘길 씨앗. `_execute`가 꺼내 가고 리포트에는 안 남는다
+        # (리포트용 씨앗은 이미 result 안에 있다).
+        record["_seeds"] = tuple(getattr(result, "request_seeds", ()) or ())
+        return record
 
     # ------------------------------------------------------------------ 조회
     def _get(self, scan_id: str) -> ScanState:
@@ -288,6 +317,20 @@ class AgentRunner:
         with self._lock:
             ids = list(self._scans)
         return [self.get_status(scan_id) for scan_id in ids]
+
+
+def _merge_seeds(pool: list, new) -> None:
+    """씨앗을 풀에 합친다. 같은 (method, template)이면 먼저 온 것을 남긴다.
+
+    정찰이 이미 자기 안에서 합쳐 주지만, 씨앗을 내는 에이전트가 둘 이상이 되면
+    같은 엔드포인트를 두 번 검사하게 된다. 여기서 한 번 더 막는다.
+    """
+    seen = {(s.method, s.template) for s in pool}
+    for seed in new:
+        key = (seed.method, seed.template)
+        if key not in seen:
+            seen.add(key)
+            pool.append(seed)
 
 
 def _record(

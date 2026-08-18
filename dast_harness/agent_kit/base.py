@@ -27,12 +27,21 @@ class Agent(ABC):
     name: str = ""              # "recon" / "injection" / "idor". scanner는 f"agent:{name}"
     unit: str = "endpoint"      # Coverage.unit — 이 에이전트가 세는 단위
     result_cls: type[AgentResult] = AgentResult   # 고유 산출물이 있으면 하위 타입으로
+    # 정찰의 `request_seeds`를 입력으로 받는가. injection/IDOR은 True다.
+    # True인데 씨앗이 하나도 없으면 러너가 **실행하지 않고 실패로 세운다** —
+    # 검사할 게 0건인 실행은 "깨끗함"이 아니라 "안 봄"이고, 그걸 completed로
+    # 보고하면 리포트가 거짓말을 한다.
+    wants_seeds: bool = False
 
     def __init__(self, client: AgentHttpClient) -> None:
         # 에이전트는 이 클라이언트만 쓴다. 직접 requests를 쓰면 안전 경계를 우회한다.
         self.client = client
         # 찾는 대로 여기에 append 한다. 중단되더라도 여기까지는 살아남는다.
         self.findings: list[Finding] = []
+        # 앞서 돈 에이전트(정찰)가 만든 요청 씨앗. **러너가 채워준다** —
+        # `client.actors`와 같은 방식이라 생성자를 고칠 필요가 없다.
+        # 직접 돌릴 때는 손으로 넣으면 된다: `agent.seeds = recon.request_seeds`
+        self.seeds: tuple = ()
 
     @abstractmethod
     def run(self, base: str) -> AgentResult:
