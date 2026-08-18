@@ -19,7 +19,7 @@ import re
 import sys
 from collections import deque
 from dataclasses import replace
-from urllib.parse import parse_qsl, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from ..models import Severity
 from .base import Agent
@@ -43,6 +43,18 @@ FIELD = re.compile(rf"<(?:input|select|textarea)\b{_TAG_ATTRS}>", re.I)
 ATTR = re.compile(r"""([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]*))""")
 
 NUMERIC_SEG = re.compile(r"^\d+$")
+
+# 사용자 열거 판정에 쓰는 값들.
+# 비밀번호는 하나만 쓴다 — 계정 잠금을 유발하지 않기 위해서다.
+WRONG_PASSWORD = "not-the-password-9f2a"
+# 존재하지 않는다고 확신할 수 있는 이름 둘. 응답이 안정적인지 보려면 둘이 필요하다.
+ABSENT_USERS = ("nonexistent-user-7c1d", "nonexistent-user-3b8e")
+USERNAME_FIELDS = ("user", "email", "login", "account", "id")
+PASSWORD_FIELDS = ("pass", "pwd", "secret")
+# 경로가 이렇게 생겼으면 인증을 처리할 가능성이 높다 (정렬에만 쓴다).
+LOGIN_PATH_HINTS = ("login", "signin", "sign-in", "auth", "session")
+# 폼이 여러 개일 때 몇 개까지 시도할지. 폼마다 3회를 보내므로 상한을 둔다.
+MAX_LOGIN_CANDIDATES = 3
 
 # 값이 아니라 데이터가 아닌 컨트롤. 주입 대상이 아니다.
 NON_DATA_FIELDS = ("submit", "button", "reset", "image")
@@ -103,6 +115,8 @@ class ReconAgent(Agent):
         # url -> 잘리지 않은 본문. exchange.response_excerpt는 증거용으로 잘려
         # 있으므로 파싱에 쓰면 경계 뒤의 폼이 조용히 사라진다.
         self.bodies: dict[str, str] = {}
+        self.skipped = 0
+        self.skip_reasons: dict[str, int] = {}
 
     # ------------------------------------------------------------------- 수집
     def _add(self, seed: RequestSeed) -> None:
@@ -245,6 +259,143 @@ class ReconAgent(Agent):
                     if nxt and _strip_fragment(nxt) not in seen:
                         queue.append((nxt, "link"))
 
+    # --------------------------------------------------------- 사용자 열거 판정
+    def _probe_user_enumeration(self, base: str) -> None:
+        """로그인 실패 응답이 계정 존재 여부를 알려주는가.
+
+        **대조를 두 번 한다.** 실재 계정과 없는 계정의 응답이 다르다는 것만으로는
+        부족하다 — 응답에 타임스탬프나 토큰이 섞여 있으면 매번 다르기 때문이다.
+        그래서 없는 계정을 **두 번** 보내 그 둘이 같은지 확인한다.
+
+            기준선  실재 계정 + 틀린 비밀번호  → 응답 A
+            공격    없는 계정1 + 틀린 비밀번호 → 응답 B
+            대조    없는 계정2 + 틀린 비밀번호 → 응답 B와 같아야 한다
+
+        A ≠ B 이고 B == B2 이면 차이의 원인이 **계정 존재 여부**로 좁혀진다.
+        B ≠ B2 이면 응답이 원래 흔들리는 것이므로 판정하지 않는다.
+
+        비밀번호는 틀린 것 하나만 쓴다. 계정 잠금을 유발할 수 있어 시도를 3회로
+        묶고, 무차별 대입은 `withheld`에 남긴다.
+        """
+        candidates = self._login_seeds()
+        if not candidates:
+            self._skip("no-login-form")
+            return
+        # 사용자명/비밀번호 폼이 여럿일 수 있고(로그인·가입·관리자), 그중 **실제로
+        # 인증을 처리하는 것**만 차이를 낸다. 경로 이름이 로그인처럼 생긴 것을
+        # 먼저 보되, 하나만 보고 포기하지 않는다 — 예전엔 첫 후보(관리자 폼)가
+        # 로그인 처리를 안 해서 조용히 아무것도 못 찾았다.
+        for seed, user_field, pass_field in candidates[:MAX_LOGIN_CANDIDATES]:
+            if self._differential(seed, user_field, pass_field):
+                return
+
+    def _differential(self, seed, user_field, pass_field) -> bool:
+        """이 폼 하나를 판정한다. finding을 냈으면 True."""
+        known = self._known_username(seed, user_field)
+        if known is None:
+            # 실재한다고 믿을 만한 계정이 없으면 기준선을 못 잡는다. 아무 이름이나
+            # 넣고 "실재 계정"이라 가정하면 판정이 통째로 무의미해진다.
+            self._skip("no-known-account")
+            return False
+
+        def attempt(username: str, note: str):
+            body = urlencode({user_field: username, pass_field: WRONG_PASSWORD})
+            return self.client.post(seed.url, body=body, note=note)
+
+        baseline = attempt(known, f"기준선: 실재 계정 {known!r} + 틀린 비밀번호")
+        absent1 = attempt(ABSENT_USERS[0], "공격: 없는 계정 + 틀린 비밀번호")
+        absent2 = attempt(ABSENT_USERS[1], "대조: 다른 없는 계정 — 응답이 안정적인지 확인")
+
+        if baseline.status is None or absent1.status is None:
+            self._skip("login-unreachable")
+            return False
+        if absent1.response_excerpt != absent2.response_excerpt:
+            # 없는 계정끼리도 응답이 다르다 = 응답이 원래 흔들린다. 계정 존재
+            # 여부 때문이라고 말할 수 없다.
+            self._skip("login-response-unstable")
+            return False
+        if baseline.response_excerpt == absent1.response_excerpt:
+            return False    # 같은 응답 = 열거 불가. 이 폼은 정상이다.
+
+        same_status = baseline.status == absent1.status
+        self.findings.append(AgentFinding(
+            scanner=f"agent:{self.name}",
+            finding_id="user-enumeration-login",
+            name="로그인 실패 응답이 계정 존재 여부를 알려줌 (username enumeration)",
+            severity=Severity.LOW,
+            confidence=Confidence.CONFIRMED,
+            category="information-disclosure",
+            matched_at=seed.url,
+            description=(
+                "실재하는 계정과 없는 계정의 로그인 실패 응답이 서로 다르다. "
+                "공격자가 유효한 사용자명 목록을 만들 수 있고, 그건 비밀번호 공격의 "
+                "출발점이 된다."
+            ),
+            tags=["recon", "user-enumeration", "information-disclosure"],
+            evidence=Evidence(
+                baseline_index=0,
+                rationale=(
+                    f"실재 계정 {known!r}과 없는 계정의 실패 응답이 다르다"
+                    + (f" (둘 다 {baseline.status}인데 본문이 다름)" if same_status
+                       else f" ({baseline.status} vs {absent1.status})")
+                    + ". 없는 계정 두 개의 응답은 서로 같으므로, 차이의 원인은 "
+                      "응답의 흔들림이 아니라 계정 존재 여부다."
+                ),
+                exchanges=[baseline, absent1, absent2],
+            ),
+            agent_data={self.name: Probe(
+                strategy="login-differential",
+                target=seed.template,
+                target_kind="endpoint",
+                attempts=3,
+                hits=[known],
+                actors=["anon"],
+                # 계정 잠금을 유발할 수 있어 일부러 안 한 것.
+                withheld=["credential-bruteforce", "account-lockout-probing",
+                          "timing-side-channel"],
+                extra={"user_field": user_field,
+                       "same_status": same_status},
+            )},
+        ))
+        return True
+
+    def _login_seeds(self):
+        """사용자명/비밀번호를 둘 다 받는 POST 씨앗들. 로그인처럼 생긴 것 우선."""
+        found = []
+        for seed in self._collected.values():
+            if seed.method != "POST":
+                continue
+            user = next((p.name for p in seed.params
+                         if p.location == "body"
+                         and any(k in p.name.lower() for k in USERNAME_FIELDS)), None)
+            pw = next((p.name for p in seed.params
+                       if p.location == "body"
+                       and any(k in p.name.lower() for k in PASSWORD_FIELDS)), None)
+            if user and pw:
+                found.append((seed, user, pw))
+        # 경로가 로그인처럼 생긴 것을 앞으로. 그게 인증을 처리할 가능성이 높다.
+        found.sort(key=lambda item: not any(
+            hint in urlparse(item[0].url).path.lower() for hint in LOGIN_PATH_HINTS))
+        return found
+
+    def _known_username(self, seed, user_field: str) -> str | None:
+        """실재한다고 믿을 만한 계정 이름.
+
+        1) `--auth`가 세션을 세운 actor — 로그인이 실제로 됐으므로 확실하다
+        2) 폼에 박혀 있던 값 (`value="admin"` 같은 것)
+        지어내지 않는다. 없으면 None.
+        """
+        actors = [a for a in self.client.actors if a != "anon"]
+        if actors:
+            return actors[0]
+        observed = next((p.value for p in seed.params
+                         if p.name == user_field and p.value), None)
+        return observed or None
+
+    def _skip(self, reason: str) -> None:
+        self.skipped += 1
+        self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
+
     # ------------------------------------------------------------------- 판정
     def _probe(self, base: str) -> None:
         """**여기만 고치면 다른 에이전트가 된다.**
@@ -307,12 +458,15 @@ class ReconAgent(Agent):
     def run(self, base: str) -> ReconResult:
         self.crawl(base)
         self._probe(base)
+        self._probe_user_enumeration(base)
 
         # finish()가 coverage/요청수/blocked를 채우고 계약을 검사한다.
         # 위반이면 AssertionError — 조용히 넘기지 않는다.
         return self.finish(
             self.findings,
             tested=len(self.exchanges),
+            skipped=self.skipped,
+            skip_reasons=self.skip_reasons,
             request_seeds=sorted(self._collected.values(),
                                  key=lambda s: (s.template, s.method)),
         )
