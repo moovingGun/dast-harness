@@ -38,6 +38,11 @@ class ConsoleReporter(Reporter):
                     f"{coverage.get('unit', 'unit')} tested"
                 )
             lines.append(line + ")")
+            # Which identities it ran as. "no findings" means something very
+            # different logged in than logged out, so never leave it implicit.
+            for who, auth in (st.get("auth") or {}).items():
+                mark = "ok" if auth.get("ok") else f"FAILED — {auth.get('reason')}"
+                lines.append(f"      as {who}: {mark}")
 
         counts = report.severity_counts()
         summary = "  ".join(f"{sev}={n}" for sev, n in counts.items() if n)

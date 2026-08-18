@@ -84,8 +84,9 @@ return self.finish(
 ## 3. HTTP는 `AgentHttpClient`로만
 
 ```python
-ex = self.client.get(url, actor="alice", note="공격: id만 1002로 바꿈")
-ex = self.client.post(url, actor="alice", body="username=alice&password=alice123")
+owner = self.client.actors[0]                 # --auth가 세워둔 신원
+ex = self.client.get(url, actor=owner, note="공격: id만 1002로 바꿈")
+ex = self.client.get(url, actor="anon", note="대조: 비로그인")
 ```
 
 `requests` / `httpx` / `urllib.request`를 **직접 쓰지 마라.** 이유는 안전 경계다 —
@@ -101,9 +102,14 @@ ex = self.client.post(url, actor="alice", body="username=alice&password=alice123
 
 알아둘 것:
 
-- **`actor`별로 쿠키가 격리된다.** `actor="alice"`로 로그인하면 그 뒤 `actor="alice"`
-  요청에만 세션이 붙는다. `actor="anon"`은 계속 비로그인이다. IDOR은 두 신원이
-  동시에 필요하므로 이게 핵심이다
+- **로그인은 네가 짜지 않는다.** `--auth` 시나리오가 세션을 세우고, 살아있는지
+  확인된 신원만 `self.client.actors`에 올라온다. **자격증명을 에이전트 코드에
+  박지 마라** — 실제 대상은 CSRF·Bearer·SSO·MFA로 제각각이라 박아두면 우리 연습
+  타겟에서만 돈다. 자세한 건 README의 "인증 시나리오"
+- **`actor`별로 쿠키가 격리된다.** `actor="alice"` 요청에만 alice 세션이 붙고,
+  `actor="anon"`은 계속 비로그인이다. IDOR은 두 신원이 동시에 필요하므로 이게 핵심이다
+- **`client.actors`가 비어 있으면 비로그인으로 대신하지 마라.** 그건 "못 찾음"이
+  아니라 "안 봄"이다. `skipped`와 `skip_reasons`로 넘겨라
 - 돌려주는 `HttpExchange`는 이미 채워져 있다. **손으로 만들지 마라** — 그러면
   `actor`나 마스킹을 빼먹는다
 - 쿠키는 `request_headers`에 안 나타난다 (전송 계층에서 붙는다). 신원은 `actor`가 말한다
@@ -336,30 +342,31 @@ class IdorAgent(Agent):
         self.skip_reasons = {}
 
     def run(self, base):
-        ex = self.client.post(f"{base}/login", actor="alice",
-                              body="username=alice&password=alice123",
-                              note="alice 로그인")
-        if ex.status != 200:
+        # 신원은 `--auth` 시나리오가 준다. **자격증명을 에이전트에 박지 마라** —
+        # 대상마다 로그인 방식이 다르고, 박아두면 우리 연습 타겟에서만 돈다.
+        # 여기 올라온 actor는 세션이 살아있음이 이미 확인된 것들이다.
+        if not self.client.actors:
             # 세션이 없으면 판정 자체가 불가능하다. "못 찾음"이 아니라 "안 봄".
             self.skip_reasons["no-auth-session"] = len(self.seeds)
             return self.finish(self.findings, tested=0,
                                skipped=len(self.seeds),
                                skip_reasons=self.skip_reasons)
 
+        owner = self.client.actors[0]
         for seed in self.seeds:
-            self._probe(seed)
+            self._probe(seed, owner)
 
         return self.finish(self.findings, tested=self.tested,
                            skipped=self.skipped,
                            skip_reasons=self.skip_reasons)
 
-    def _probe(self, seed):
+    def _probe(self, seed, owner):
         """기준선(자기 것) → 공격(남의 것) → 대조(비로그인)."""
         path_param = next(p for p in seed.params if p.location == "path")
         self.tested += 1
 
-        baseline = self.client.get(seed.url, actor="alice",
-                                   note="기준선: alice가 자기 객체를 조회")
+        baseline = self.client.get(seed.url, actor=owner,
+                                   note=f"기준선: {owner}가 자기 객체를 조회")
         if baseline.status != 200:
             self.skipped += 1
             self.skip_reasons["baseline-not-200"] = \
@@ -368,7 +375,7 @@ class IdorAgent(Agent):
 
         neighbour = str(int(path_param.value) + 1)
         attack_url = seed.url.replace(path_param.value, neighbour)
-        attack = self.client.get(attack_url, actor="alice",
+        attack = self.client.get(attack_url, actor=owner,
                                  note=f"공격: {path_param.name}만 {neighbour}로 바꿈")
         if attack.status != 200 or attack.response_excerpt == baseline.response_excerpt:
             return                              # 남의 것이 안 보인다 = 정상
@@ -390,7 +397,7 @@ class IdorAgent(Agent):
             evidence=Evidence(
                 baseline_index=0,
                 rationale=(
-                    f"alice 세션으로 {neighbour}번 객체가 200으로 반환되고 본문이 "
+                    f"{owner} 세션으로 {neighbour}번 객체가 200으로 반환되고 본문이 "
                     f"기준선과 다르다. 3번 요청이 {control.status}이므로 인증 자체는 "
                     "걸려 있고 소유권 검사만 없다 — '인증 누락'이 아니라 IDOR이다."
                 ),
@@ -402,7 +409,7 @@ class IdorAgent(Agent):
                 target_kind="object-id",
                 attempts=2,
                 hits=[neighbour],
-                actors=["alice", "anon"],
+                actors=[owner, "anon"],
                 withheld=["write-methods"],     # PUT/DELETE는 시도하지 않았다
                 extra={"seed": seed.template, "baseline_id": path_param.value},
             )},
@@ -413,12 +420,23 @@ class IdorAgent(Agent):
 
 ```python
 from dast_harness.agent_kit import AgentHttpClient
+from dast_harness.agent_kit.auth import establish, load_actors
 from dast_harness.agent_kit.recon import ReconAgent
 
 BASE = "http://127.0.0.1:8080"
 recon = ReconAgent(AgentHttpClient(allowlist=set(), max_requests=200)).run(BASE)
-result = IdorAgent(AgentHttpClient(allowlist=set(), max_requests=200),
-                   seeds=recon.request_seeds).run(BASE)
+
+client = AgentHttpClient(allowlist=set(), max_requests=200)
+establish(client, load_actors("targets/vulnerable_app/actors.json"), BASE)
+result = IdorAgent(client, seeds=recon.request_seeds).run(BASE)
+```
+
+CLI로 돌릴 때는 `establish()`를 직접 부를 일이 없다 — `--auth`를 주면 러너가
+에이전트마다 알아서 세션을 세우고, 실패하면 에이전트를 실행하지 않는다.
+
+```bash
+dast-harness scan http://127.0.0.1:8080 -s agent:idor \
+    --auth targets/vulnerable_app/actors.json
 ```
 
 ```
@@ -536,6 +554,10 @@ AGENTS = {"recon": ReconAgent, "idor": IdorAgent}
 ```bash
 dast-harness scan http://127.0.0.1:8080 -s agent:idor          # 네 것만
 dast-harness scan http://127.0.0.1:8080 -s nuclei,agent:idor   # 스캐너와 같이
+
+# 로그인 뒤를 봐야 하면 신원을 준다 (자격증명은 코드가 아니라 여기에 있다)
+dast-harness scan http://127.0.0.1:8080 -s agent:idor \
+    --auth targets/vulnerable_app/actors.json
 ```
 
 `agent:` 접두사는 §3의 규칙 3(`scanner` 값이 `agent:<이름>`)과 같은 문자열이다.

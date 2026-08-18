@@ -73,6 +73,11 @@ class AgentHttpClient:
         self._jars: dict[str, http.cookiejar.CookieJar] = {}
         self._openers: dict[str, urllib.request.OpenerDirector] = {}
         self._blocked: list[tuple[str, str]] = []   # (url, 거부 사유)
+        self._actor_headers: dict[str, dict[str, str]] = {}
+        # 세션이 **살아있음을 확인한** actor만 여기 들어온다. auth.establish()가
+        # 채운다. 에이전트는 이 목록만 믿으면 된다 — 설정에 alice가 적혀 있다는
+        # 사실과 alice로 로그인이 됐다는 사실은 다른 얘기다.
+        self._actors: list[str] = []
 
     # ------------------------------------------------------------------ actor
     def _opener(self, actor: str) -> urllib.request.OpenerDirector:
@@ -87,6 +92,49 @@ class AgentHttpClient:
 
     def cookies(self, actor: str) -> list[str]:
         return [c.name for c in self._jars.get(actor, [])]
+
+    @property
+    def actors(self) -> list[str]:
+        """세션이 확인된 actor 이름들. **IDOR 에이전트의 진입점이다.**
+
+            for actor in self.client.actors: ...
+
+        비어 있으면 `--auth`가 없었거나 전부 인증에 실패한 것이다. 그때 비로그인
+        요청으로 대신하지 말고 `skipped`로 넘겨라 — 아무것도 못 찾은 결과와
+        로그인 없이 찾아본 결과는 다르다.
+        """
+        return list(self._actors)
+
+    def mark_authenticated(self, actor: str) -> None:
+        """`auth.establish()`가 verify를 통과시킨 뒤에만 부른다."""
+        if actor not in self._actors:
+            self._actors.append(actor)
+
+    def set_actor_headers(self, actor: str, headers: dict[str, str]) -> None:
+        """이 actor의 모든 요청에 붙일 헤더 (`Authorization: Bearer ...` 등).
+
+        요청마다 준 헤더가 우선한다. 값은 `HttpExchange`에서 마스킹된다.
+        """
+        self._actor_headers.setdefault(actor, {}).update(headers)
+
+    def set_cookie(self, actor: str, name: str, value: str, url: str) -> None:
+        """이 actor의 쿠키 항아리에 쿠키를 직접 넣는다.
+
+        사람이 브라우저로 로그인해서 받은 세션을 그대로 넘겨줄 때 쓴다 — SSO나
+        MFA가 걸린 실제 대상에서는 로그인 자동화가 아예 불가능하므로, 이 경로가
+        자동 로그인보다 오히려 본체다.
+        """
+        host = urlparse(url).hostname or ""
+        jar = self._jars.get(actor)
+        if jar is None:
+            self._opener(actor)          # 항아리와 opener를 함께 만든다
+            jar = self._jars[actor]
+        jar.set_cookie(http.cookiejar.Cookie(
+            version=0, name=name, value=value, port=None, port_specified=False,
+            domain=host, domain_specified=True, domain_initial_dot=False,
+            path="/", path_specified=True, secure=False, expires=None,
+            discard=True, comment=None, comment_url=None, rest={}, rfc2109=False,
+        ))
 
     @property
     def blocked(self) -> list[tuple[str, str]]:
@@ -145,7 +193,8 @@ class AgentHttpClient:
             self._blocked.append((url, str(exc)))
             raise
 
-        req_headers = dict(headers or {})
+        # actor 기본 헤더가 먼저, 요청별 헤더가 나중 — 호출부가 항상 이긴다.
+        req_headers = {**self._actor_headers.get(actor, {}), **(headers or {})}
         req_headers.setdefault("User-Agent", self.user_agent)
         req_headers.setdefault("Accept-Encoding", "gzip")
 
