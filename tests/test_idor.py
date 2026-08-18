@@ -18,18 +18,6 @@ BOB = '{"id": 1002, "owner": "bob@example.com", "item": "dock"}'
 DENIED = '{"error": "authentication required"}'
 
 
-class _AuthedClient(FakeClient):
-    """세션이 확인된 신원을 흉내낸다. 실제로는 auth.establish()가 채운다."""
-
-    def __init__(self, pages=None, actors=("alice",), **kw):
-        super().__init__(pages, **kw)
-        self._actors = list(actors)
-
-    @property
-    def actors(self):
-        return list(self._actors)
-
-
 def _seed(path="/api/orders/1001", value="1001"):
     return RequestSeed(
         method="GET", url=f"{ORIGIN}{path}",
@@ -40,7 +28,7 @@ def _seed(path="/api/orders/1001", value="1001"):
 
 
 def _run(pages, seeds=None, actors=("alice",)):
-    client = _AuthedClient(pages, actors=actors)
+    client = FakeClient(pages, actors=actors)
     agent = IdorAgent(client)
     agent.seeds = seeds if seeds is not None else [_seed()]
     return agent.run(ORIGIN), client
@@ -84,7 +72,7 @@ class VulnerableTests(unittest.TestCase):
         self.assertEqual(probe.target_kind, "object-id")
 
 
-class _ActorAwareClient(_AuthedClient):
+class _ActorAwareClient(FakeClient):
     """`anon`에게는 401을 준다. 인가 없음과 인증 없음을 가르는 축이 actor다."""
 
     def _exchange(self, method, url, table, kw):
@@ -114,7 +102,7 @@ class ControlLegTests(unittest.TestCase):
     def test_anon_that_also_gets_in_is_only_firm(self):
         # 비로그인도 통과하면 인증 자체가 없는 API일 수 있다. 조치 방법이
         # 달라지므로 확정하지 않는다.
-        client = _AuthedClient(self.PAGES, actors=("alice",))
+        client = FakeClient(self.PAGES, actors=("alice",))
         agent = IdorAgent(client); agent.seeds = [_seed()]
         result = agent.run(ORIGIN)
         finding = result.findings[0]
