@@ -21,6 +21,39 @@ from .scanners.base import Scanner
 _STOP_GRACE = 2.0
 
 
+def rollup_status(statuses: list[str]) -> str:
+    """Combine per-child statuses into one overall status.
+
+    running                 : any child still active
+    stopped                 : an effective user stop dominates
+    completed               : every child completed cleanly
+    completed_with_warnings : all succeeded, at least one had warnings
+    partial                 : some succeeded, some failed (results exist)
+    failed                  : none succeeded
+
+    Shared by every runner that has children — scanners, agents, and the
+    combined view — so one rule decides the overall status everywhere.
+    """
+    succeeded = {
+        ScanStatus.COMPLETED.value,
+        ScanStatus.COMPLETED_WITH_WARNINGS.value,
+    }
+    active = {ScanStatus.PENDING.value, ScanStatus.RUNNING.value}
+    if any(s in active for s in statuses):
+        return ScanStatus.RUNNING.value
+    if any(s == ScanStatus.STOPPED.value for s in statuses):
+        return ScanStatus.STOPPED.value
+
+    ok = [s for s in statuses if s in succeeded]
+    if len(ok) == len(statuses):
+        if any(s == ScanStatus.COMPLETED_WITH_WARNINGS.value for s in statuses):
+            return ScanStatus.COMPLETED_WITH_WARNINGS.value
+        return ScanStatus.COMPLETED.value
+    if ok:
+        return ScanStatus.PARTIAL.value
+    return ScanStatus.FAILED.value
+
+
 class MultiScanRunner:
     def __init__(
         self, scanners: list[Scanner], allowlist: set[str] | None = None
@@ -72,35 +105,7 @@ class MultiScanRunner:
                 raise KeyError(f"unknown scan_id {group_id!r}")
             return self._groups[group_id]
 
-    @staticmethod
-    def _rollup(statuses: list[str]) -> str:
-        """Combine per-scanner statuses into one overall status.
-
-        running                 : any scanner still active
-        stopped                 : an effective user stop dominates
-        completed               : every scanner completed cleanly
-        completed_with_warnings : all succeeded, at least one had warnings
-        partial                 : some succeeded, some failed (results exist)
-        failed                  : none succeeded
-        """
-        succeeded = {
-            ScanStatus.COMPLETED.value,
-            ScanStatus.COMPLETED_WITH_WARNINGS.value,
-        }
-        active = {ScanStatus.PENDING.value, ScanStatus.RUNNING.value}
-        if any(s in active for s in statuses):
-            return ScanStatus.RUNNING.value
-        if any(s == ScanStatus.STOPPED.value for s in statuses):
-            return ScanStatus.STOPPED.value
-
-        ok = [s for s in statuses if s in succeeded]
-        if len(ok) == len(statuses):
-            if any(s == ScanStatus.COMPLETED_WITH_WARNINGS.value for s in statuses):
-                return ScanStatus.COMPLETED_WITH_WARNINGS.value
-            return ScanStatus.COMPLETED.value
-        if ok:
-            return ScanStatus.PARTIAL.value
-        return ScanStatus.FAILED.value
+    _rollup = staticmethod(rollup_status)
 
     def get_status(self, group_id: str) -> dict:
         mapping = self._mapping(group_id)

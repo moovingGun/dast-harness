@@ -8,6 +8,9 @@ import unittest
 
 from dast_harness import Finding, ScanOutcome, Severity
 from dast_harness import cli
+from dast_harness.agent_kit import (AgentFinding, Confidence, Evidence,
+                                    HttpExchange, Probe)
+from dast_harness.agent_kit.base import Agent
 from dast_harness.orchestrator import MultiScanRunner
 from dast_harness.scanners.base import Scanner
 
@@ -95,6 +98,29 @@ class SlowButStops(Scanner):
                 break
             time.sleep(0.02)
         return _outcome(parsed_records=0)
+
+
+class ProbeAgent(Agent):
+    """A stand-in agent that reports one finding without touching the network."""
+
+    name = "probe"
+    unit = "endpoint"
+
+    def run(self, base):
+        exchange = HttpExchange(
+            method="GET", url=f"{base}/x", status=200, actor="anon",
+            response_headers={"Content-Type": "text/html"}, response_excerpt="hi",
+        )
+        finding = AgentFinding(
+            scanner="agent:probe", finding_id="p-1", name="probe finding",
+            severity=Severity.MEDIUM, matched_at=f"{base}/x",
+            confidence=Confidence.TENTATIVE, category="injection",
+            evidence=Evidence(exchanges=[exchange], rationale="테스트용",
+                              baseline_index=0),
+            agent_data={"probe": Probe(strategy="s", target="q",
+                                       target_kind="parameter")},
+        )
+        return self.finish([finding], tested=2)
 
 
 def run_cli(argv):
@@ -217,6 +243,65 @@ class CliTests(unittest.TestCase):
         cli.SCANNERS = {"good": Good, "off": Unavailable}
         code, _ = run_cli(["scan", LOCAL])  # no --scanner
         self.assertEqual(code, 0)
+
+
+class AgentSelectionTests(unittest.TestCase):
+    """Agents are picked through the same -s flag, as 'agent:<name>'."""
+
+    def setUp(self):
+        self._scanners = dict(cli.SCANNERS)
+        self._agents = dict(cli.AGENTS)
+        cli.AGENTS = {"probe": ProbeAgent}
+
+    def tearDown(self):
+        cli.SCANNERS = self._scanners
+        cli.AGENTS = self._agents
+
+    def test_agent_only_runs_without_any_scanner_installed(self):
+        # A teammate with no nuclei/nikto must still be able to run their agent.
+        cli.SCANNERS = {"off": Unavailable}
+        code, out = run_cli(["scan", LOCAL, "-s", "agent:probe"])
+        self.assertEqual(code, 0)
+        self.assertIn("agent:probe", out)
+
+    def test_scanner_and_agent_appear_in_one_report(self):
+        cli.SCANNERS = {"good": Good}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.json")
+            code, _ = run_cli(["scan", LOCAL, "-s", "good,agent:probe",
+                               "--format", "json", "-o", path])
+            with open(path) as fh:
+                data = json.load(fh)
+        self.assertEqual(code, 0)
+        self.assertEqual(data["findings_count"], 2)
+        self.assertIn("good", data["scanners"])
+        self.assertIn("probe", data["agents"])
+        # The agent's own deliverable rides along, not just its findings.
+        self.assertEqual(data["agents"]["probe"]["result"]["coverage"]["tested"], 2)
+
+    def test_unknown_agent_exits_2(self):
+        cli.SCANNERS = {"good": Good}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _ = run_cli(["scan", LOCAL, "-s", "agent:nope"])
+        self.assertEqual(code, 2)
+        self.assertIn("nope", err.getvalue())
+
+    def test_agents_are_off_unless_named(self):
+        cli.SCANNERS = {"good": Good}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.json")
+            run_cli(["scan", LOCAL, "--format", "json", "-o", path])
+            with open(path) as fh:
+                data = json.load(fh)
+        self.assertIsNone(data["agents"])
+
+    def test_agent_target_is_still_authorized(self):
+        cli.SCANNERS = {"good": Good}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code, _ = run_cli(["scan", "http://8.8.8.8", "-s", "agent:probe"])
+        self.assertEqual(code, 2)
 
     # --- Problem 2: deadline expiry must win over a late completion -------
     def test_timeout_then_completion_in_grace_exits_124(self):

@@ -226,7 +226,13 @@ def main(argv=None) -> int:
 
     try:
         truth = load_ground_truth(args.ground_truth)
-        scanners = cli._select_scanners(args.scanner)
+        scanners, agents = cli._select(args.scanner)
+        if agents:
+            # Refuse rather than silently drop them: scoring agent findings
+            # (and the must_not_detect false-positive side) is not built yet, so
+            # accepting the selector here would report a recall that quietly
+            # excluded everything the agents found.
+            raise ValueError("agents are not scored yet; pass scanners only")
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE

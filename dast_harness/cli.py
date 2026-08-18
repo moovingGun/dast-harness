@@ -16,6 +16,8 @@ import argparse
 import math
 import sys
 
+from .agent_kit.recon import ReconAgent
+from .agent_runner import AgentRunner, CombinedRunner
 from .models import ScanConfig, Severity, Target
 from .orchestrator import MultiScanRunner
 from .reporters import ConsoleReporter, JSONReporter, build_report
@@ -25,6 +27,13 @@ from .scanners.nuclei import NucleiScanner
 
 # name -> factory. Tests monkeypatch this to inject fakes.
 SCANNERS = {"nuclei": NucleiScanner, "nikto": NiktoScanner}
+
+# Agents are selected through the same --scanner flag, prefixed with AGENT_PREFIX
+# ("-s agent:recon"). That prefix is not a CLI invention: the finding contract
+# already requires an agent's `scanner` value to be f"agent:{name}", so the
+# selector and the reported source are the same string.
+AGENTS = {"recon": ReconAgent}
+AGENT_PREFIX = "agent:"
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -48,7 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("url", help="target URL (http/https)")
     scan.add_argument(
         "-s", "--scanner",
-        help="comma list of scanners (default: all available)",
+        help="comma list of scanners and/or agents, e.g. 'nuclei,agent:recon' "
+             "(default: all available scanners, no agents)",
     )
     scan.add_argument(
         "--allow", action="append", metavar="HOST",
@@ -94,17 +104,41 @@ def _build_config(args) -> ScanConfig:
     )
 
 
-def _select_scanners(spec: str | None):
-    names = _csv(spec) if spec else list(SCANNERS)
-    names = [n for n in names if n]
-    unknown = [n for n in names if n not in SCANNERS]
+def _select(spec: str | None):
+    """Split the --scanner value into scanner instances and agent classes.
+
+    Omitting --scanner selects every installed scanner and *no* agents: an agent
+    picks its next URL from what the target sends back, so it is only ever
+    turned on by name, never implicitly.
+    """
+    if not spec:
+        return [SCANNERS[n]() for n in SCANNERS], []
+
+    scanner_names: list[str] = []
+    agent_names: list[str] = []
+    unknown: list[str] = []
+    for name in [n for n in _csv(spec) if n]:
+        if name.startswith(AGENT_PREFIX):
+            bare = name[len(AGENT_PREFIX):]
+            if bare in AGENTS:
+                agent_names.append(bare)
+            else:
+                unknown.append(name)   # echo it back as typed, prefix included
+        elif name in SCANNERS:
+            scanner_names.append(name)
+        else:
+            unknown.append(name)
     if unknown:
         raise ValueError(
             f"unknown scanner(s): {', '.join(unknown)} "
-            f"(available: {', '.join(SCANNERS)})"
+            f"(available: {', '.join(SCANNERS)}"
+            + (f", {', '.join(AGENT_PREFIX + a for a in AGENTS)}" if AGENTS else "")
+            + ")"
         )
-    ordered = list(dict.fromkeys(names))  # dedupe, keep order
-    return [SCANNERS[n]() for n in ordered]
+    return (
+        [SCANNERS[n]() for n in dict.fromkeys(scanner_names)],   # dedupe, keep order
+        [AGENTS[n] for n in dict.fromkeys(agent_names)],
+    )
 
 
 def _emit(runner, scan_id, args) -> bool:
@@ -150,7 +184,7 @@ def main(argv=None) -> int:
 
     try:
         config = _build_config(args)
-        scanners = _select_scanners(args.scanner)
+        scanners, agents = _select(args.scanner)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -165,11 +199,22 @@ def main(argv=None) -> int:
             return EXIT_USAGE
 
     available = [s for s in scanners if s.is_available()]
-    if not available:
+    if not available and not agents:
         print("error: no requested scanner is installed", file=sys.stderr)
         return EXIT_USAGE
 
-    runner = MultiScanRunner(available, allowlist=set(args.allow or []))
+    allowlist = set(args.allow or [])
+    children: dict[str, object] = {}
+    if available:
+        children["scanners"] = MultiScanRunner(available, allowlist=allowlist)
+    if agents:
+        children["agents"] = AgentRunner(agents, allowlist=allowlist)
+    # With a single child, use it directly — no merging layer where there is
+    # nothing to merge, so the scanner-only path stays exactly as it was.
+    runner = (
+        next(iter(children.values())) if len(children) == 1
+        else CombinedRunner(children, allowlist=allowlist)
+    )
     try:
         scan_id = runner.start_scan(Target(args.url), config)
     except TargetNotAuthorizedError as exc:

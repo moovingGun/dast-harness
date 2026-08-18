@@ -13,6 +13,7 @@ from .models import (
     Target,
 )
 from .reporters import ConsoleReporter, JSONReporter, Reporter, ScanReport, build_report
+from .agent_runner import AgentRunner, CombinedRunner
 from .orchestrator import MultiScanRunner
 from .runner import ScanRunner
 from .safety import TargetNotAuthorizedError, authorize_target
@@ -31,6 +32,8 @@ __all__ = [
     "Target",
     "ScanRunner",
     "MultiScanRunner",
+    "AgentRunner",
+    "CombinedRunner",
     "ScannerExecutionError",
     "NucleiScanner",
     "NiktoScanner",

@@ -523,19 +523,36 @@ print(validate_result(result) or "통과")
 
 ---
 
-## 11. 아직 안 된 것
+## 11. 다 만들었으면 CLI에 등록한다
 
-**에이전트를 하네스에 자동으로 꽂는 배관이 아직 없다.** `cli.py` /
-`orchestrator.py` / `validate.py`는 아직 `agent`를 모른다. 즉 지금은
-`-s recon`처럼 CLI로 돌릴 수 없고, 직접 import해서 실행해야 한다.
+`cli.py`의 `AGENTS`에 한 줄 더하면 끝이다.
 
-DongGeon이 `AgentRunner` / `AgentOrchestrator`(스캐너 러너의 형제)로 만들 예정이다.
-**네 에이전트 코드는 그때 안 고쳐도 된다** — 배관이 붙는 지점은 `AgentResult`이고,
-그 모양은 이미 확정됐다. 지금 이 가이드대로 만들면 된다.
+```python
+from .agent_kit.idor import IdorAgent
 
-같이 남은 것:
+AGENTS = {"recon": ReconAgent, "idor": IdorAgent}
+```
 
-- `validate.py`가 에이전트 findings를 채점하지 못한다 (스캐너만 돌린다)
+```bash
+dast-harness scan http://127.0.0.1:8080 -s agent:idor          # 네 것만
+dast-harness scan http://127.0.0.1:8080 -s nuclei,agent:idor   # 스캐너와 같이
+```
+
+`agent:` 접두사는 §3의 규칙 3(`scanner` 값이 `agent:<이름>`)과 같은 문자열이다.
+nuclei/nikto가 안 깔린 노트북에서도 `-s agent:idor`는 돈다.
+
+찾은 findings는 스캐너 것과 같은 리포트에 섞여 나오고, `coverage`/`completion`/
+고유 산출물은 상태의 `agents.<이름>.result`로 나간다. **`run()`이 `AgentResult`만
+제대로 돌려주면 이 배관은 네 코드를 안 건드린다.**
+
+### 아직 안 된 것
+
+- **중단이 에이전트 경계에서만 듣는다.** 인프로세스 루프라 밖에서 못 죽인다.
+  Ctrl-C를 눌러도 돌고 있는 에이전트는 자기 일을 끝낸다. 요청 단위로 끊으려면
+  `AgentHttpClient`에 stop_event가 들어가야 하고 그건 아직 없다.
+  → 루프가 길어질 것 같으면 스스로 상한을 두고 `skipped`로 넘겨라.
+- `validate.py`가 에이전트 findings를 채점하지 못한다 (`-s agent:...`를 주면
+  조용히 빼먹는 대신 거부한다). 그래서 §8의 정답지 매칭은 아직 손으로 확인해야 한다.
 - `must_not_detect`(오탐 함정)가 채점에 안 물려 있다
 
 막히면 요청하지 말고 직접 고쳐서 PR로 보내라. `safety.py`만 DongGeon 승인이 필요하다.

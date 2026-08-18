@@ -45,10 +45,10 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ⬜ | injection 에이전트 ← 팀원 작업 |
 | ⬜ | IDOR 에이전트 ← 팀원 작업 |
 | ✅ | 리포터에 에이전트 필드(`confidence`/`evidence`/`agent_data`) 반영 |
-| ⬜ | 에이전트를 CLI·오케스트레이터에 꽂는 배관 |
+| ✅ | 에이전트를 CLI에 꽂는 배관 (`-s agent:recon`) — 중단은 에이전트 경계에서만 |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 260개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 281개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -63,7 +63,7 @@ dast-harness --help      # 콘솔 스크립트
 
 ```bash
 dast-harness scan http://127.0.0.1:8080 \
-    --scanner nuclei,nikto \      # 기본: 설치된 것 전부
+    --scanner nuclei,agent:recon \  # 기본: 설치된 스캐너 전부, 에이전트 없음
     --allow staging.internal \    # allowlist 추가 (반복 가능)
     --severity high,critical \    # nuclei passthrough
     --timeout 120 \               # 그룹 전체 deadline
@@ -108,6 +108,8 @@ dast_harness/
 ├── runner.py            단일 스캐너 생명주기: start_scan/get_status/get_results/
 │                        stop_scan/wait
 ├── orchestrator.py      MultiScanRunner: 여러 스캐너 병렬 실행 + 상태 롤업/결과 병합
+├── agent_runner.py      AgentRunner: 러너의 형제. 에이전트 순차 실행 +
+│                        CombinedRunner로 스캐너 결과와 한 리포트에 합침
 ├── cli.py               one-shot CLI (python -m dast_harness scan)
 ├── validate.py          정답지 대비 탐지 정확도 채점
 └── reporters/           출력 전용 계층 (console, json)
@@ -157,10 +159,12 @@ example.py / example_multi.py   스캐너 사용 예시
 
 자세한 규칙은 [CLAUDE.md](CLAUDE.md)에 있다.
 
-> **아직 안 된 것:** 에이전트를 CLI에 자동으로 꽂는 배관이 없다. `cli.py` /
-> `orchestrator.py` / `validate.py`는 아직 에이전트를 모르므로, 지금은 직접
-> import해서 실행한다. 배관이 붙는 지점은 `AgentResult`이고 그 모양은 확정됐으니
-> **에이전트 코드는 나중에 고치지 않아도 된다.**
+에이전트를 만들었으면 `cli.py`의 `AGENTS`에 한 줄 등록하면 CLI에서 바로 돈다
+(아래 [에이전트 실행](#에이전트-실행-agent_runnerpy)).
+
+> **아직 안 된 것:** `validate.py`는 에이전트 findings를 채점하지 못한다
+> (`-s agent:...`를 주면 조용히 빼먹는 대신 거부한다). `must_not_detect`(오탐 함정)도
+> 채점에 안 물려 있다.
 
 ## 스캐너 (scanners/)
 
@@ -219,6 +223,47 @@ print(ConsoleReporter().render(build_report(runner, scan_id)))
 `completed`와 결과를 유지하며, 실행 중 스캐너에만 중단 신호가 전달된다. **모두 완료된
 뒤의 `stop_scan()`은 no-op**으로, 기존 완료 상태를 그대로 둔다.
 `results_partial` = 전체 상태가 성공(위 두 상태) 이외일 때 `True`.
+
+## 에이전트 실행 (agent_runner.py)
+
+에이전트는 `Scanner` 어댑터로 감싸지 **않는다.** `Scanner.run()`은 결과를
+`on_finding(Finding)` 콜백으로만 흘리는데, 정찰의 주 산출물인 `request_seeds`
+(injection/IDOR의 입력)를 보낼 채널이 거기에 없기 때문이다. 대신 메서드 이름만
+같은 형제 러너를 둔다 — 그래서 리포터는 안 고쳐도 된다.
+
+```bash
+dast-harness scan http://127.0.0.1:8080 -s agent:recon        # 에이전트만
+dast-harness scan http://127.0.0.1:8080 -s nuclei,agent:recon # 섞어서
+```
+
+`agent:` 접두사는 CLI가 지어낸 게 아니다. finding 계약이 이미 에이전트의 `scanner`
+값을 `agent:<이름>`으로 요구하므로 **고르는 이름과 리포트에 찍히는 출처가 같은
+문자열**이다. `-s`를 생략하면 설치된 스캐너 전부 + 에이전트 없음이다. 에이전트는
+타겟이 돌려준 내용을 보고 다음 URL을 정하므로 암묵적으로 켜지지 않는다.
+
+에이전트를 만들었으면 `cli.py`의 `AGENTS`에 한 줄만 더한다.
+
+```python
+AGENTS = {"recon": ReconAgent, "idor": IdorAgent}
+```
+
+**에이전트는 순차로 돈다.** 스캐너를 병렬로 돌리는 이유는 각자 서브프로세스로 수 분씩
+걸려서지만, 에이전트는 인프로세스이고 정찰 → injection/IDOR로 씨앗을 넘기는 순서가
+어차피 필요하다. 클라이언트는 에이전트마다 새로 만든다 — 하나를 공유하면
+`requests_made`와 `blocked`가 앞 에이전트 것까지 합산돼 계약이 조용히 거짓이 된다.
+
+에이전트별 산출물(`coverage`/`completion`/`request_seeds`)은 상태의 `agents` 키로,
+findings는 스캐너와 같은 공용 채널로 나간다. **같은 finding을 두 곳에 싣지 않는다.**
+
+```json
+"agents": {"recon": {"status": "completed", "findings_count": 1,
+                     "result": {"coverage": {...}, "request_seeds": [...]}}}
+```
+
+> **중단의 한계:** 에이전트는 인프로세스 루프라 밖에서 죽일 수 없다. `stop_scan()`은
+> **에이전트와 에이전트 사이**에서만 듣는다. 실행 중인 에이전트를 요청 단위로 끊으려면
+> `AgentHttpClient`에 stop_event가 들어가야 하고 그건 아직 없다. 그래서 실제로 건너뛴
+> 에이전트가 있을 때만 `stopped`로 적는다 — 안 멈췄는데 멈췄다고 보고하지 않는다.
 
 ## 리포팅 (reporters/)
 
