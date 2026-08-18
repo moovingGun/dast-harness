@@ -28,8 +28,15 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 
 3번 출력이 이 프로젝트가 무엇을 주고받는지 가장 빠르게 보여준다.
 
-**에이전트를 만들러 왔다면 → [AGENT_GUIDE.md](AGENT_GUIDE.md)** 하나만 읽으면 된다.
-아래 "팀원이 봐야 할 것"에 순서가 있다.
+**에이전트를 만들러 왔다면** 만드는 방식에 따라 문서가 갈린다.
+
+| 방식 | 읽을 것 |
+|---|---|
+| Python (`Agent` 상속) | [AGENT_GUIDE.md](AGENT_GUIDE.md) |
+| Claude 서브에이전트 (마크다운 + skill) | [SUBAGENT_GUIDE.md](SUBAGENT_GUIDE.md) |
+
+둘 다 **같은 안전 경계를 지나고 같은 결과 계약**을 내므로 한 리포트로 합쳐지고
+같은 정답지로 채점된다.
 
 ## 구현 상태
 
@@ -136,7 +143,8 @@ tests/                           도커·스캐너 설치 없이 전부 돈다
 ├── test_target_app.py           취약 타겟이 문서대로 취약한지
 └── test_safety.py ...           안전장치·러너·리포터 등
 
-AGENT_GUIDE.md            📖 **에이전트 작성 가이드. 여기서 시작.**
+AGENT_GUIDE.md            📖 **Python 에이전트 작성 가이드**
+SUBAGENT_GUIDE.md         📖 **Claude 서브에이전트 작성 가이드** (probe/ingest 사용법)
 AGENTS.md                 📖 AI 도구용 진입점 (위 문서들을 가리키는 짧은 포인터)
 CLAUDE.md                 📖 저장소 작업 규칙 (사람·AI 공통)
 finding-v0-proposal.md       계약을 정할 때의 설계 논의 기록 (읽지 않아도 된다)
