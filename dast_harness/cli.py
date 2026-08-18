@@ -19,6 +19,7 @@ import sys
 from .agent_kit.auth import AuthConfigError, load_actors
 from .agent_kit.recon import ReconAgent
 from .agent_runner import AgentRunner, CombinedRunner
+from . import probe
 from .models import ScanConfig, Severity, Target
 from .orchestrator import MultiScanRunner
 from .reporters import ConsoleReporter, JSONReporter, build_report
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dast-harness", description="Minimal local-only DAST harness."
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    probe.add_arguments(sub)
     scan = sub.add_parser("scan", help="scan a local/allowlisted target")
     scan.add_argument("url", help="target URL (http/https)")
     scan.add_argument(
@@ -183,6 +185,9 @@ def _validate_options(args) -> str | None:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.command == "probe":
+        return probe.run(args)
 
     option_error = _validate_options(args)
     if option_error is not None:
