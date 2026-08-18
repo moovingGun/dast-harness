@@ -79,6 +79,50 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(actors["bob"].cookies)      # takes a supplied session
 
 
+class CredentialScopeTests(unittest.TestCase):
+    """A supplied token must not follow the actor to another allowed host.
+
+    The allowlist says "you may scan these hosts". It does not say "these hosts
+    may have each other's credentials". Cookies are already host-scoped by the
+    cookie jar; headers were not, so a Bearer token for one staging host rode
+    along to every other allowlisted one.
+
+    No server needed: the request headers are built before the socket is opened,
+    so a failed connection still records what would have been sent.
+    """
+
+    def _client(self):
+        client = AgentHttpClient(allowlist={"a.internal", "b.internal"})
+        client.set_actor_headers("alice", {"Authorization": "Bearer TOKEN-A"},
+                                 "http://a.internal/")
+        return client
+
+    def _sent(self, client, url):
+        return "Authorization" in client.request("GET", url, actor="alice").request_headers
+
+    def test_token_goes_to_the_host_it_was_scoped_to(self):
+        self.assertTrue(self._sent(self._client(), "http://a.internal/x"))
+
+    def test_token_does_not_follow_to_another_allowed_host(self):
+        self.assertFalse(self._sent(self._client(), "http://b.internal/x"))
+
+    def test_port_does_not_split_the_scope(self):
+        # Same rule as cookies, and the same host on another port is the same
+        # app in practice. Being stricter would drop auth silently instead.
+        self.assertTrue(self._sent(self._client(), "http://a.internal:8443/x"))
+
+    def test_rebinding_an_actor_to_a_second_host_is_refused(self):
+        client = self._client()
+        with self.assertRaises(ValueError):
+            client.set_actor_headers("alice", {"Authorization": "Bearer TOKEN-B"},
+                                     "http://b.internal/")
+
+    def test_other_actors_are_unaffected(self):
+        client = self._client()
+        exchange = client.request("GET", "http://a.internal/x", actor="anon")
+        self.assertNotIn("Authorization", exchange.request_headers)
+
+
 class EstablishTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

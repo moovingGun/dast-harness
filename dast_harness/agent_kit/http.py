@@ -110,12 +110,30 @@ class AgentHttpClient:
         if actor not in self._actors:
             self._actors.append(actor)
 
-    def set_actor_headers(self, actor: str, headers: dict[str, str]) -> None:
-        """이 actor의 모든 요청에 붙일 헤더 (`Authorization: Bearer ...` 등).
+    def set_actor_headers(
+        self, actor: str, headers: dict[str, str], url: str
+    ) -> None:
+        """이 actor가 **`url`의 호스트로** 보낼 때 붙일 헤더 (`Bearer ...` 등).
+
+        호스트에 묶는 게 요점이다. allowlist에 호스트가 둘 이상이면 A의 토큰이
+        B로 따라가서, 인가된 대상 안에서도 크리덴셜이 섞인다. 쿠키는 cookiejar가
+        도메인으로 묶어주므로 헤더도 같은 기준으로 묶는다.
+
+        포트는 보지 않는다 — 쿠키와 같은 기준이고, 같은 호스트의 다른 포트는
+        실무에서 같은 앱이다.
 
         요청마다 준 헤더가 우선한다. 값은 `HttpExchange`에서 마스킹된다.
         """
-        self._actor_headers.setdefault(actor, {}).update(headers)
+        host = (urlparse(url).hostname or "").lower()
+        scope, existing = self._actor_headers.get(actor, (host, {}))
+        if scope != host:
+            # 한 actor를 두 호스트에 쓰려는 것은 설정 실수다. 조용히 덮어쓰면
+            # 어느 쪽 토큰이 나가는지 알 수 없게 된다.
+            raise ValueError(
+                f"actor {actor!r}의 헤더가 이미 {scope!r}에 묶여 있다 "
+                f"({host!r}로 다시 설정할 수 없다). 호스트마다 actor를 나눠라."
+            )
+        self._actor_headers[actor] = (host, {**existing, **headers})
 
     def set_cookie(self, actor: str, name: str, value: str, url: str) -> None:
         """이 actor의 쿠키 항아리에 쿠키를 직접 넣는다.
@@ -197,8 +215,13 @@ class AgentHttpClient:
             self._blocked.append((url, str(exc)))
             raise
 
-        # actor 기본 헤더가 먼저, 요청별 헤더가 나중 — 호출부가 항상 이긴다.
-        req_headers = {**self._actor_headers.get(actor, {}), **(headers or {})}
+        # actor 기본 헤더는 **묶인 호스트로 갈 때만** 붙는다. allowlist에 호스트가
+        # 둘이면 A의 토큰이 B로 새는 경로가 여기였다.
+        scope, actor_headers = self._actor_headers.get(actor, ("", {}))
+        if scope and scope != (urlparse(url).hostname or "").lower():
+            actor_headers = {}
+        # actor 헤더가 먼저, 요청별 헤더가 나중 — 호출부가 항상 이긴다.
+        req_headers = {**actor_headers, **(headers or {})}
         req_headers.setdefault("User-Agent", self.user_agent)
         req_headers.setdefault("Accept-Encoding", "gzip")
 
