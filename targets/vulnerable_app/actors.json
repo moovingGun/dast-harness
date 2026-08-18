@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "연습 타겟(targets/vulnerable_app/app.py)용 인증 시나리오.",
+    "IDOR 에이전트는 두 신원이 동시에 필요하다 — alice의 것(기준선), bob의 것(대조).",
+    "alice는 로그인 시퀀스를 재생하고, bob은 이미 딴 세션을 주입한다.",
+    "실제 대상에서는 후자가 본체다: MFA나 SSO가 걸리면 로그인 자동화가 안 되므로",
+    "사람이 브라우저로 로그인한 뒤 쿠키나 Bearer 토큰을 여기 붙여넣는다.",
+    "verify는 필수다. 없으면 세션이 죽은 걸 모르고 비로그인으로 스캔하면서",
+    "'취약점 없음'을 보고한다."
+  ],
+  "actors": {
+    "alice": {
+      "login": [
+        {
+          "method": "POST",
+          "path": "/login",
+          "body": {"username": "alice", "password": "alice123"}
+        }
+      ],
+      "verify": {
+        "path": "/api/orders/1001",
+        "expect_status": 200,
+        "body_contains": "alice@example.com"
+      }
+    },
+    "bob": {
+      "cookies": {"session": "bob-session"},
+      "verify": {
+        "path": "/api/orders/1002",
+        "expect_status": 200,
+        "body_contains": "bob@example.com"
+      }
+    }
+  }
+}

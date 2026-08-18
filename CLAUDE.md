@@ -85,7 +85,8 @@ dast_harness/
   safety.py          # 대상 인증 — 수정 금지
   scanners/          # nuclei, nikto 어댑터
   agent_kit/         # 에이전트용: base.py(Agent 상속) contract.py(계약)
-                     #             http.py(HTTP) recon.py(복사할 골격)
+                     #             http.py(HTTP) auth.py(인증 시나리오)
+                     #             recon.py(복사할 골격)
   runner.py          # 단일 스캐너 생명주기
   orchestrator.py    # 다중 스캐너 병렬 + 롤업
   agent_runner.py    # 러너의 형제 — 에이전트 순차 실행 + 스캐너 결과와 합치기

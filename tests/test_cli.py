@@ -296,6 +296,35 @@ class AgentSelectionTests(unittest.TestCase):
                 data = json.load(fh)
         self.assertIsNone(data["agents"])
 
+    def test_bad_auth_file_exits_2_before_scanning(self):
+        SpyGood.runs = 0
+        cli.SCANNERS = {"spy": SpyGood}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "actors.json")
+            with open(path, "w") as fh:
+                # No 'verify' block — rejected at load time.
+                json.dump({"actors": {"alice": {"cookies": {"s": "x"}}}}, fh)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code, _ = run_cli(["scan", LOCAL, "-s", "spy,agent:probe",
+                                   "--auth", path])
+        self.assertEqual(code, 2)
+        self.assertEqual(SpyGood.runs, 0)          # nothing was started
+        self.assertIn("verify", err.getvalue())
+
+    def test_auth_without_an_agent_exits_2(self):
+        cli.SCANNERS = {"good": Good}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "actors.json")
+            with open(path, "w") as fh:
+                json.dump({"actors": {"alice": {"cookies": {"s": "x"},
+                                                "verify": {"path": "/"}}}}, fh)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                code, _ = run_cli(["scan", LOCAL, "-s", "good", "--auth", path])
+        self.assertEqual(code, 2)
+        self.assertIn("agent", err.getvalue())
+
     def test_agent_target_is_still_authorized(self):
         cli.SCANNERS = {"good": Good}
         err = io.StringIO()

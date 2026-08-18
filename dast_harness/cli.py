@@ -16,6 +16,7 @@ import argparse
 import math
 import sys
 
+from .agent_kit.auth import AuthConfigError, load_actors
 from .agent_kit.recon import ReconAgent
 from .agent_runner import AgentRunner, CombinedRunner
 from .models import ScanConfig, Severity, Target
@@ -63,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--allow", action="append", metavar="HOST",
         help="allowlist a host (repeatable)",
+    )
+    scan.add_argument(
+        "--auth", metavar="FILE",
+        help="agent auth scenario (JSON): identities to scan as. Each needs a "
+             "'verify' block, so a dead session fails loudly instead of "
+             "silently scanning logged out",
     )
     scan.add_argument("--severity", help="nuclei: comma list of severities")
     scan.add_argument("--tags", help="nuclei: comma list of tags")
@@ -185,8 +192,16 @@ def main(argv=None) -> int:
     try:
         config = _build_config(args)
         scanners, agents = _select(args.scanner)
-    except ValueError as exc:
+        # Read the scenario before anything starts: a bad file surfacing
+        # mid-scan would leave half a run behind.
+        actors = load_actors(args.auth) if args.auth else {}
+    except (ValueError, AuthConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if actors and not agents:
+        print("error: --auth only applies to agents; select one with "
+              "-s agent:<name>", file=sys.stderr)
         return EXIT_USAGE
 
     if args.scanner is not None:
@@ -208,7 +223,8 @@ def main(argv=None) -> int:
     if available:
         children["scanners"] = MultiScanRunner(available, allowlist=allowlist)
     if agents:
-        children["agents"] = AgentRunner(agents, allowlist=allowlist)
+        children["agents"] = AgentRunner(agents, allowlist=allowlist,
+                                         actors=actors)
     # With a single child, use it directly — no merging layer where there is
     # nothing to merge, so the scanner-only path stays exactly as it was.
     runner = (

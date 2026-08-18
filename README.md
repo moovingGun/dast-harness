@@ -46,9 +46,10 @@ python3 -m dast_harness.agent_kit.recon http://127.0.0.1:8080   # 3) 동작하�
 | ⬜ | IDOR 에이전트 ← 팀원 작업 |
 | ✅ | 리포터에 에이전트 필드(`confidence`/`evidence`/`agent_data`) 반영 |
 | ✅ | 에이전트를 CLI에 꽂는 배관 (`-s agent:recon`) — 중단은 에이전트 경계에서만 |
+| ✅ | **인증 시나리오** (`--auth`) — 로그인 재생 / 세션 주입 + 살아있음 확인 강제 |
 | ⬜ | 에이전트 findings 정확도 채점, 오탐(`must_not_detect`) 채점 |
 
-테스트 281개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
+테스트 304개가 위 ✅ 항목을 고정한다 (도커·스캐너 설치 불필요).
 
 ## 설치
 
@@ -101,6 +102,7 @@ dast_harness/
 │   │                    validate_finding() / validate_result()
 │   ├── base.py       📖 Agent 추상 클래스. 상속해서 run() 하나만 구현한다
 │   ├── http.py       📖 AgentHttpClient — 에이전트가 쓸 수 있는 유일한 HTTP 통로
+│   ├── auth.py       📖 인증 시나리오 — 로그인 재생 / 세션 주입 / 살아있음 확인
 │   └── recon.py      📖 동작하는 정찰 에이전트. **이걸 복사해서 시작한다**
 │      ✍️ idor.py         ← IDOR 담당자가 여기에 추가
 │      ✍️ injection.py    ← injection 담당자가 여기에 추가
@@ -118,6 +120,7 @@ targets/
 ├── compose.yml                   통제 취약 타겟 컨테이너 (127.0.0.1 전용 게시)
 └── vulnerable_app/
     ├── app.py                 📖 의도적으로 취약한 stdlib 앱 — 연습 대상
+    ├── actors.json            📖 인증 시나리오 예시 (alice=로그인, bob=세션 주입)
     └── ground_truth.json      ✍️ 이 앱의 취약점 정답지. 새 취약점을 찾게 만들면
                                   여기에도 항목을 추가한다
 
@@ -264,6 +267,73 @@ findings는 스캐너와 같은 공용 채널로 나간다. **같은 finding을 
 > **에이전트와 에이전트 사이**에서만 듣는다. 실행 중인 에이전트를 요청 단위로 끊으려면
 > `AgentHttpClient`에 stop_event가 들어가야 하고 그건 아직 없다. 그래서 실제로 건너뛴
 > 에이전트가 있을 때만 `stopped`로 적는다 — 안 멈췄는데 멈췄다고 보고하지 않는다.
+
+## 인증 시나리오 (agent_kit/auth.py)
+
+값나가는 취약점(IDOR, 접근통제 우회, 권한 상승)은 거의 전부 로그인 뒤에 있다.
+인증을 못 붙이면 에이전트는 비로그인 표면만 훑고, 그건 스캐너가 이미 하는 일이다.
+
+```bash
+dast-harness scan http://127.0.0.1:8080 -s agent:idor \
+    --auth targets/vulnerable_app/actors.json
+```
+
+**로그인 절차를 코드에 박지 않는다.** 실제 대상은 CSRF 토큰, `Authorization: Bearer`,
+OAuth 리다이렉트, MFA로 제각각이라 "POST /login에 username/password"를 코드로 정해두면
+연습 타겟에서만 돈다. 시나리오 파일을 읽어서 재생할 뿐이다.
+
+세션을 얻는 방법은 둘이다.
+
+```json
+{"actors": {
+  "alice": {
+    "login": [{"method": "POST", "path": "/login",
+               "body": {"username": "alice", "password": "alice123"}}],
+    "verify": {"path": "/api/orders/1001", "expect_status": 200,
+               "body_contains": "alice@example.com"}
+  },
+  "bob": {
+    "cookies": {"session": "bob-session"},
+    "verify": {"path": "/api/orders/1002", "expect_status": 200}
+  }
+}}
+```
+
+1. `login` — 요청 시퀀스를 재생한다. 폼 로그인처럼 자동화가 되는 경우.
+2. `cookies` / `headers` — **이미 딴 세션을 그대로 받는다.** MFA·CAPTCHA·SSO가 걸린
+   대상은 로그인 자동화가 원리적으로 불가능하다. 사람이 브라우저로 로그인한 뒤
+   쿠키나 `Authorization: Bearer ...`를 넘겨주는 이 경로가 **실전에서는 오히려 본체**다
+   (Burp/ZAP를 실제 engagement에서 쓰는 방식이 이거다).
+
+### `verify`는 선택이 아니다
+
+세션이 만료됐거나 로그인이 조용히 실패하면 스캔 전체가 비로그인으로 돌면서
+**"IDOR 없음"을 보고한다.** 깨끗한 성적표로 보이는 완전한 미탐이고, 인증 스캔에서
+가장 흔한 사고다. 그래서 `verify` 없는 actor는 **파일을 읽는 단계에서 거부**하고,
+인증에 실패한 신원이 하나라도 있으면 그 에이전트를 아예 실행하지 않는다.
+
+```
+  - agent:recon: failed (0 findings)
+      as bob: FAILED — /api/orders/1002 응답이 401 (기대 200)
+
+Error  : recon: 인증 실패로 실행하지 않음 (bob: ...)
+```
+
+`expect_status`만으로는 부족한 경우가 많다 — 로그인 페이지를 200으로 돌려주는 앱이
+흔하다. 그럴 때 `body_contains`로 "로그인된 화면에만 있는 문자열"을 짚는다.
+
+### 자격증명은 리포트에 남지 않는다
+
+로그인 교환은 **증거에서 제외한다.** 평문 비밀번호가 실려 있어 리포트를 공유하는
+순간 같이 나간다. 남는 것은 "누구로 인증됐나"뿐이다. 주입한 헤더(`Authorization`
+등)는 `HttpExchange`에서 마스킹된다.
+
+```json
+"auth": {"alice": {"ok": true, "reason": "", "requests_made": 2}}
+```
+
+`anon`은 예약된 이름이다 — 모든 에이전트가 대조군으로 쓰는 비로그인 신원이라
+시나리오에서 정의할 수 없다.
 
 ## 리포팅 (reporters/)
 

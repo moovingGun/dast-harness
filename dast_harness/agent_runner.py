@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 
+from .agent_kit.auth import Actor, establish
 from .agent_kit.base import Agent
 from .agent_kit.http import AgentHttpClient
 from .models import Finding, ScanConfig, ScanState, ScanStatus, Target
@@ -46,6 +47,7 @@ class AgentRunner:
         allowlist: set[str] | None = None,
         *,
         max_requests: int = DEFAULT_MAX_REQUESTS,
+        actors: dict[str, Actor] | None = None,
     ) -> None:
         if not agents:
             raise ValueError("at least one agent is required")
@@ -57,6 +59,7 @@ class AgentRunner:
         self.agents = list(agents)
         self.allowlist = allowlist or set()
         self.max_requests = max_requests
+        self.actors = dict(actors or {})
         self._scans: dict[str, ScanState] = {}
         self._records: dict[str, dict[str, dict]] = {}  # scan_id -> name -> record
         self._stop_events: dict[str, threading.Event] = {}
@@ -160,14 +163,36 @@ class AgentRunner:
         클라이언트는 **에이전트마다 새로 만든다.** 하나를 공유하면
         `AgentCompletion.requests_made`와 `blocked`가 앞 에이전트 것까지 합산돼
         "이 에이전트가 몇 번 요청했나"라는 계약이 조용히 거짓이 된다.
+
+        따라서 인증도 에이전트마다 다시 세운다. 로그인 요청이 에이전트 수만큼
+        늘지만(보통 1~2회), 그 대가로 한 에이전트의 세션 만료가 다음 에이전트를
+        오염시키지 않는다. 세션을 공유해서 아끼기에는 "만료된 세션으로 조용히
+        비로그인 스캔"이 너무 비싼 실패다.
         """
         client = AgentHttpClient(
             allowlist=self.allowlist,
             max_requests=self.max_requests,
             timeout=config.request_timeout or _DEFAULT_TIMEOUT,
         )
-        agent = agent_cls(client)
         started_at = time.time()
+
+        auth = establish(client, self.actors, state.target.url) if self.actors else {}
+        failed = [r for r in auth.values() if not r.ok]
+        if failed:
+            # 인증에 실패한 채로 계속 돌면 에이전트가 비로그인으로 훑고 "취약점
+            # 없음"을 보고한다. 깨끗한 성적표로 보이는 미탐이라 여기서 세운다.
+            reason = "; ".join(f"{r.actor}: {r.reason}" for r in failed)
+            state.add_warning(f"[agent:{agent_cls.name}] 인증 실패 — {reason}")
+            return _record(
+                ScanStatus.FAILED, started_at=started_at, finished_at=time.time(),
+                error=f"인증 실패로 실행하지 않음 ({reason})", auth=auth,
+                # 에이전트가 안 돌면 AgentCompletion이 없어서 blocked가 통째로
+                # 사라진다. 시나리오가 허가 범위 밖을 가리켰다는 증거를 여기서
+                # 버리면 안 된다.
+                blocked=client.blocked,
+            )
+
+        agent = agent_cls(client)
         try:
             result = agent.run(state.target.url)
         except Exception as exc:  # noqa: BLE001 - 계약 위반도 네트워크 실패도 여기로
@@ -178,7 +203,7 @@ class AgentRunner:
             state.add_warning(f"[agent:{agent_cls.name}] {exc}")
             return _record(
                 ScanStatus.FAILED, started_at=started_at, finished_at=time.time(),
-                error=str(exc), findings_count=len(agent.findings),
+                error=str(exc), findings_count=len(agent.findings), auth=auth,
             )
 
         for finding in result.findings:
@@ -190,7 +215,7 @@ class AgentRunner:
         findings_count = len(payload.pop("findings", []))
         return _record(
             ScanStatus.COMPLETED, started_at=started_at, finished_at=time.time(),
-            findings_count=findings_count, result=payload,
+            findings_count=findings_count, result=payload, auth=auth,
         )
 
     # ------------------------------------------------------------------ 조회
@@ -273,15 +298,23 @@ def _record(
     error: str | None = None,
     findings_count: int = 0,
     result: dict | None = None,
+    auth: dict | None = None,
+    blocked: list | None = None,
 ) -> dict:
-    return {
+    record = {
         "status": status.value,
         "started_at": started_at,
         "finished_at": finished_at,
         "error": error,
         "findings_count": findings_count,
         "result": result,
+        # 어느 신원으로 돌았는지. 인증 없이 돈 결과와 alice로 돈 결과는 다른
+        # 물건이라, 리포트만 보고 구별할 수 있어야 한다.
+        "auth": {name: r.to_dict() for name, r in (auth or {}).items()},
     }
+    if blocked:
+        record["blocked"] = [list(b) for b in blocked]
+    return record
 
 
 class CombinedRunner:

