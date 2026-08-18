@@ -17,6 +17,8 @@ import math
 import sys
 
 from .agent_kit.auth import AuthConfigError, load_actors
+from .agent_kit.idor import IdorAgent
+from .agent_kit.injection import InjectionAgent
 from .agent_kit.recon import ReconAgent
 from .agent_runner import AgentRunner, CombinedRunner
 from . import ingest, probe
@@ -36,7 +38,8 @@ SCANNERS = {"nuclei": NucleiScanner, "nikto": NiktoScanner,
 # ("-s agent:recon"). That prefix is not a CLI invention: the finding contract
 # already requires an agent's `scanner` value to be f"agent:{name}", so the
 # selector and the reported source are the same string.
-AGENTS = {"recon": ReconAgent}
+AGENTS = {"recon": ReconAgent, "injection": InjectionAgent,
+          "idor": IdorAgent}
 AGENT_PREFIX = "agent:"
 
 EXIT_OK = 0

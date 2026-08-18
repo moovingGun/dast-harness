@@ -31,21 +31,24 @@ EXPECTED = [
 
 
 def _finding(name, *, finding_id="tpl", scanner="nuclei",
-             severity=Severity.INFO, matched_at="http://127.0.0.1:8080/"):
+             severity=Severity.INFO, path="/", matched_at=None):
+    # A finding now credits an entry only when it was observed at that entry's
+    # path, so every test has to say where the finding came from.
     return Finding(scanner=scanner, finding_id=finding_id, name=name,
-                   severity=severity, matched_at=matched_at)
+                   severity=severity,
+                   matched_at=matched_at or f"http://127.0.0.1:8080{path}")
 
 
 class ScoreTest(unittest.TestCase):
     def test_keyword_match_is_case_insensitive(self):
-        report = validate.score([_finding("Exposed DOTENV file")], EXPECTED)
+        report = validate.score([_finding("Exposed DOTENV file", path="/.env")], EXPECTED)
         detected = {e.id: e.detected for e in report.entries}
         self.assertTrue(detected["exposed-dotenv"])
         self.assertFalse(detected["phpinfo-disclosure"])
 
     def test_matches_on_finding_id_too(self):
         report = validate.score(
-            [_finding("Config exposure", finding_id="phpinfo-files")], EXPECTED)
+            [_finding("Config exposure", finding_id="phpinfo-files", path="/phpinfo.php")], EXPECTED)
         self.assertTrue({e.id: e.detected for e in report.entries}["phpinfo-disclosure"])
 
     def test_recall_counts_distinct_entries(self):
@@ -53,21 +56,23 @@ class ScoreTest(unittest.TestCase):
         self.assertEqual(report.detected_count, 0)
         self.assertEqual(report.recall, 0.0)
 
-        findings = [_finding("dotenv exposure"), _finding("phpinfo() page"),
-                    _finding("Directory listing enabled")]
+        findings = [_finding("dotenv exposure", path="/.env"),
+                    _finding("phpinfo() page", path="/phpinfo.php"),
+                    _finding("Directory listing enabled", path="/uploads/")]
         report = validate.score(findings, EXPECTED)
         self.assertEqual(report.detected_count, 3)
         self.assertEqual(report.recall, 1.0)
 
     def test_duplicate_findings_do_not_inflate_recall(self):
-        findings = [_finding("dotenv exposure"), _finding("Exposed .env file")]
+        findings = [_finding("dotenv exposure", path="/.env"),
+                    _finding("Exposed .env file", path="/.env")]
         report = validate.score(findings, EXPECTED)
         self.assertEqual(report.detected_count, 1)
         self.assertEqual(len(report.unexpected), 0)
 
     def test_a_finding_credits_only_its_most_specific_entry(self):
         expected = EXPECTED + [_entry("generic-exposure", "/", ["exposure"])]
-        report = validate.score([_finding("dotenv exposure")], expected)
+        report = validate.score([_finding("dotenv exposure", path="/.env")], expected)
         detected = {e.id: e.detected for e in report.entries}
         self.assertTrue(detected["exposed-dotenv"])   # listed first = more specific
         self.assertFalse(detected["generic-exposure"])
@@ -76,7 +81,7 @@ class ScoreTest(unittest.TestCase):
         noise = _finding("robots.txt endpoint prober", scanner="nikto",
                          severity=Severity.MEDIUM,
                          matched_at="http://127.0.0.1:8080/robots.txt")
-        report = validate.score([_finding("dotenv exposure"), noise], EXPECTED)
+        report = validate.score([_finding("dotenv exposure", path="/.env"), noise], EXPECTED)
         self.assertEqual(len(report.unexpected), 1)
         self.assertEqual(report.unexpected[0].name, noise.name)
         # Unexpected findings are not auto-labelled false positives; the report
@@ -85,24 +90,68 @@ class ScoreTest(unittest.TestCase):
 
     def test_entry_records_which_scanner_detected_it(self):
         report = validate.score(
-            [_finding("dotenv exposure", scanner="nuclei"),
-             _finding("dotenv file found", scanner="nikto")], EXPECTED)
+            [_finding("dotenv exposure", scanner="nuclei", path="/.env"),
+             _finding("dotenv file found", scanner="nikto", path="/.env")], EXPECTED)
         entry = {e.id: e for e in report.entries}["exposed-dotenv"]
         self.assertEqual(sorted(entry.scanners), ["nikto", "nuclei"])
         self.assertEqual(len(entry.findings), 2)
 
     def test_report_serializes_to_json(self):
-        report = validate.score([_finding("phpinfo() page")], EXPECTED)
+        report = validate.score([_finding("phpinfo() page", path="/phpinfo.php")], EXPECTED)
         data = json.loads(json.dumps(report.to_dict()))
         self.assertEqual(data["recall"], round(1 / 3, 4))
         self.assertEqual(data["expected_count"], 3)
         self.assertEqual(len(data["entries"]), 3)
 
     def test_render_shows_misses_and_recall(self):
-        text = validate.render(validate.score([_finding("phpinfo() page")], EXPECTED))
+        text = validate.render(validate.score([_finding("phpinfo() page", path="/phpinfo.php")], EXPECTED))
         self.assertIn("phpinfo-disclosure", text)
         self.assertIn("exposed-dotenv", text)
         self.assertIn("1/3", text)
+
+
+class PathMatchTest(unittest.TestCase):
+    """A finding credits an entry only if it was seen at that entry's path."""
+
+    def test_right_keyword_at_the_wrong_path_does_not_count(self):
+        # Real regression: nuclei fired its `chamilo-lms-sqli` template at
+        # /main/inc/ajax/extra_field.ajax.php — a path this target does not
+        # serve — and keyword matching credited it to the documented /search
+        # SQL injection, because both strings contain "sqli". Recall read 90%
+        # when the scanners had not found that weakness at all.
+        expected = [_entry("sqli-error-based-search-q", "/search",
+                           ["sqli", "sql injection"], category="injection")]
+        stray = _finding("Chamilo 1.11.14 - SQL Injection",
+                         finding_id="chamilo-lms-sqli",
+                         path="/main/inc/ajax/extra_field.ajax.php")
+        report = validate.score([stray], expected)
+        self.assertEqual([e.id for e in report.entries if e.detected], [])
+        self.assertEqual(len(report.unexpected), 1)
+
+    def test_the_same_keyword_at_the_documented_path_counts(self):
+        expected = [_entry("sqli-error-based-search-q", "/search",
+                           ["sqli"], category="injection")]
+        real = _finding("SQL injection in q", finding_id="sqli-error-based-q",
+                        path="/search")
+        report = validate.score([real], expected)
+        self.assertEqual([e.id for e in report.entries if e.detected],
+                         ["sqli-error-based-search-q"])
+
+    def test_a_directory_entry_covers_paths_below_it(self):
+        expected = [_entry("directory-listing", "/uploads/", ["listing"],
+                           category="misconfiguration")]
+        found = _finding("Directory listing enabled", path="/uploads/2024/")
+        report = validate.score([found], expected)
+        self.assertTrue(report.entries[0].detected)
+
+    def test_query_strings_do_not_break_the_path_check(self):
+        expected = [_entry("sqli", "/search", ["sqli"], category="injection")]
+        found = _finding("sqli", path="/search")
+        found = Finding(scanner="a", finding_id="sqli", name="sqli",
+                        severity=Severity.INFO,
+                        matched_at="http://127.0.0.1:8080/search?q=x%27")
+        report = validate.score([found], expected)
+        self.assertTrue(report.entries[0].detected)
 
 
 class LoadGroundTruthTest(unittest.TestCase):
@@ -137,18 +186,23 @@ class LoadGroundTruthTest(unittest.TestCase):
 
 
 class FakeScanner(Scanner):
-    """Reports one finding per ground-truth entry it is told to detect."""
+    """Reports one finding per ground-truth entry it is told to detect.
+
+    `detects` maps keyword -> the path the finding was observed at. Both halves
+    matter now: scoring requires the keyword *and* the location, so a fake that
+    reports the right words at the wrong URL is correctly scored as a miss.
+    """
 
     name = "fake"
-    detects = ["dotenv"]
+    detects = {"dotenv": "/.env"}
 
     def is_available(self):
         return True
 
     def run(self, target, config, on_finding, stop_event=None, on_warning=None):
-        for keyword in self.detects:
+        for keyword, path in self.detects.items():
             on_finding(Finding(self.name, f"{keyword}-tpl", f"{keyword} exposure",
-                               Severity.HIGH, target.url + keyword))
+                               Severity.HIGH, target.url.rstrip("/") + path))
         return ScanOutcome(exit_code=0, output_present=True, output_parseable=True,
                            parsed_records=len(self.detects))
 
@@ -175,8 +229,9 @@ class ValidateCliTest(unittest.TestCase):
         self.assertIn("1/3", text)
 
     def test_full_detection_exits_zero(self):
-        FakeScanner.detects = ["dotenv", "phpinfo", "directory listing"]
-        self.addCleanup(setattr, FakeScanner, "detects", ["dotenv"])
+        FakeScanner.detects = {"dotenv": "/.env", "phpinfo": "/phpinfo.php",
+                               "directory listing": "/uploads/"}
+        self.addCleanup(setattr, FakeScanner, "detects", {"dotenv": "/.env"})
         code, text = self._run()
         self.assertEqual(code, validate.EXIT_OK)
         self.assertIn("3/3", text)
